@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "71247000036",
+    "firebase_url": "https://familynest-ec590-default-rtdb.firebaseio.com",
+    "project_id": "familynest-ec590",
+    "storage_bucket": "familynest-ec590.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:71247000036:android:0588ba0ecd934b0d7a97f1",
+        "android_client_info": {
+          "package_name": "com.familynest.family_nest"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "71247000036-isdt708j2pcg1trkm61hkn144i4eiihk.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.familynest.family_nest",
+            "certificate_hash": "38c2fba25db3e6b93c37dbe85a2ea63e25c296de"
+          }
+        },
+        {
+          "client_id": "71247000036-osjfkpgb62ksh6qm8hi5e97gctsif0tm.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDXHnBAE_j8BaDjrqXjKmHZ0E-Io_e9Oj0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "71247000036-osjfkpgb62ksh6qm8hi5e97gctsif0tm.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

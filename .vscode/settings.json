@@ -1,0 +1,9 @@
+{
+    "java.configuration.updateBuildConfiguration": "automatic",
+    "chat.tools.terminal.autoApprove": {
+        "flutter": true,
+        "C:\\dev\\flutter\\bin\\flutter.bat": true,
+        "c:\\dev\\flutter\\bin\\flutter": true,
+        "&": true
+    }
+}

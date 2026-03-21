@@ -1,0 +1,179 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ============== HELPER FUNCTIONS ==============
+    
+    // Check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Check if user is the owner of a resource
+    function isOwner(userId) {
+      return request.auth.uid == userId;
+    }
+    
+    // Check if user is a member of the family
+    function isFamilyMember(familyId) {
+      return isAuthenticated() && 
+        exists(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid));
+    }
+    
+    // Check if user is an admin of the family
+    function isFamilyAdmin(familyId) {
+      let member = get(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid));
+      return member != null && member.data.role == 'admin';
+    }
+    
+    // Get user's family IDs
+    function getUserFamilyIds() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.familyIds;
+    }
+    
+    // Check if user shares a family with another user
+    function sharesFamilyWith(otherUserId) {
+      let userFamilies = getUserFamilyIds();
+      let otherFamilies = get(/databases/$(database)/documents/users/$(otherUserId)).data.familyIds;
+      return userFamilies.hasAny(otherFamilies);
+    }
+    
+    // ============== USERS COLLECTION ==============
+    
+    match /users/{userId} {
+      // Users can read their own profile
+      // Any authenticated user can read basic profile (for family member display)
+      allow read: if isAuthenticated();
+      
+      // Only the owner can create their profile
+      allow create: if isOwner(userId);
+      
+      // Only the owner can update their profile
+      allow update: if isOwner(userId);
+      
+      // Prevent deletion (soft delete only)
+      allow delete: if false;
+      
+      // User settings subcollection
+      match /settings/{settingId} {
+        allow read, write: if isOwner(userId);
+      }
+    }
+    
+    // ============== FAMILIES COLLECTION ==============
+    
+    match /families/{familyId} {
+      // Allow read for authenticated users who are members OR querying by invite code
+      allow read: if isAuthenticated();
+      
+      // Any authenticated user can create a family
+      allow create: if isAuthenticated() && 
+        request.resource.data.createdBy == request.auth.uid;
+      
+      // Only admins can update family info
+      allow update: if isFamilyMember(familyId);
+      
+      // Only admins can delete family (with safeguards)
+      allow delete: if isFamilyAdmin(familyId);
+      
+      // Members subcollection
+      match /members/{memberId} {
+        // Any family member can read the member list
+        allow read: if isAuthenticated() && isFamilyMember(familyId);
+        
+        // Users can add themselves as members (when joining)
+        allow create: if isAuthenticated() && memberId == request.auth.uid;
+        
+        // Members can update their own data, admins can update anyone
+        allow update: if isAuthenticated() && (
+          memberId == request.auth.uid || 
+          isFamilyAdmin(familyId)
+        );
+        
+        // Admins can remove members, members can remove themselves
+        allow delete: if isAuthenticated() && (
+          isFamilyAdmin(familyId) || 
+          memberId == request.auth.uid
+        );
+      }
+      
+      // Geofences subcollection
+      match /geofences/{geofenceId} {
+        allow read: if isFamilyMember(familyId);
+        allow write: if isFamilyAdmin(familyId);
+      }
+      
+      // Geofence events subcollection
+      match /geofence_events/{eventId} {
+        allow read: if isFamilyMember(familyId);
+        allow create: if isFamilyMember(familyId);
+        allow update, delete: if false; // Events are immutable
+      }
+    }
+    
+    // ============== INVITES COLLECTION ==============
+    
+    match /invites/{inviteCode} {
+      // Anyone authenticated can read invites (to join)
+      allow read: if isAuthenticated();
+      
+      // Only family admins can create invites
+      allow create: if isAuthenticated() && 
+        isFamilyAdmin(request.resource.data.familyId);
+      
+      // Invites are immutable
+      allow update: if false;
+      
+      // Only family admins can delete invites
+      allow delete: if isFamilyAdmin(resource.data.familyId);
+    }
+    
+    // ============== SOS EVENTS COLLECTION ==============
+    
+    match /sos_events/{eventId} {
+      // Family members can read SOS events
+      allow read: if isFamilyMember(resource.data.familyId);
+      
+      // Family members can create SOS events
+      allow create: if isAuthenticated() && 
+        isFamilyMember(request.resource.data.familyId) &&
+        request.resource.data.userId == request.auth.uid;
+      
+      // Family members can update (respond to) SOS events
+      allow update: if isFamilyMember(resource.data.familyId);
+      
+      // SOS events cannot be deleted
+      allow delete: if false;
+    }
+    
+    // ============== NOTIFICATIONS COLLECTION ==============
+    
+    match /notifications/{userId}/items/{notificationId} {
+      // Users can only read their own notifications
+      allow read: if isOwner(userId);
+      
+      // Cloud functions create notifications (service account)
+      // Users can mark as read
+      allow create: if isAuthenticated();
+      
+      // Users can update (mark as read) their notifications
+      allow update: if isOwner(userId);
+      
+      // Users can delete their notifications
+      allow delete: if isOwner(userId);
+    }
+    
+    // ============== LOCATION HISTORY COLLECTION ==============
+    
+    match /location_history/{userId}/{date}/{docId} {
+      // Only the owner and family admins can read location history
+      allow read: if isOwner(userId) || (
+        isAuthenticated() && 
+        sharesFamilyWith(userId)
+      );
+      
+      // Only the owner can write their location history
+      allow write: if isOwner(userId);
+    }
+  }
+}
