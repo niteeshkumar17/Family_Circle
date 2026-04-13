@@ -2,6 +2,7 @@ const { onValueUpdated } = require('firebase-functions/v2/database');
 const { onDocumentCreated } = require('firebase-functions/v2/firestore');
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
+const crypto = require('node:crypto');
 const { initializeApp } = require('firebase-admin/app');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { getDatabase } = require('firebase-admin/database');
@@ -109,8 +110,17 @@ exports.checkGeofences = onValueUpdated(
  * Sends emergency notifications to all family members
  */
 exports.broadcastSOS = onDocumentCreated('sos_events/{eventId}', async (event) => {
+  if (!event.data) {
+    return null;
+  }
+
   const sosEvent = event.data.data();
   const eventId = event.params.eventId;
+
+  if (!sosEvent?.familyId || !sosEvent?.userId) {
+    console.warn('Skipping SOS broadcast due to missing required fields', { eventId });
+    return null;
+  }
 
   // Get all family members except the SOS sender
   const membersSnap = await db
@@ -119,20 +129,24 @@ exports.broadcastSOS = onDocumentCreated('sos_events/{eventId}', async (event) =
     .collection('members')
     .get();
 
+  const recipientIds = membersSnap.docs
+    .map((memberDoc) => memberDoc.id)
+    .filter((memberId) => memberId !== sosEvent.userId);
+
+  const recipientUserSnaps = await Promise.all(
+    recipientIds.map((memberId) => db.collection('users').doc(memberId).get())
+  );
+
   const tokens = [];
-  const notificationPromises = [];
-
-  for (const memberDoc of membersSnap.docs) {
-    if (memberDoc.id === sosEvent.userId) continue;
-
-    const userSnap = await db.collection('users').doc(memberDoc.id).get();
-    if (userSnap.exists && userSnap.data().deviceInfo?.fcmToken) {
-      tokens.push(userSnap.data().deviceInfo.fcmToken);
+  for (const userSnap of recipientUserSnaps) {
+    const token = userSnap.data()?.deviceInfo?.fcmToken;
+    if (token) {
+      tokens.push(token);
     }
+  }
 
-    // Create notification document
-    notificationPromises.push(
-      db.collection('notifications').doc(memberDoc.id)
+  const notificationPromises = recipientIds.map((memberId) => {
+    return db.collection('notifications').doc(memberId)
         .collection('items').add({
           type: 'sos',
           title: '🚨 SOS EMERGENCY',
@@ -146,9 +160,8 @@ exports.broadcastSOS = onDocumentCreated('sos_events/{eventId}', async (event) =
           createdAt: FieldValue.serverTimestamp(),
           isRead: false,
           priority: 'urgent',
-        })
-    );
-  }
+        });
+  });
 
   // Send FCM notifications
   if (tokens.length > 0) {
@@ -218,13 +231,19 @@ exports.checkLowBattery = onValueUpdated(
         .where('role', '==', 'admin')
         .get();
 
-      const tokens = [];
-      for (const adminDoc of adminsSnap.docs) {
-        if (adminDoc.id === userId) continue;
+      const adminIds = adminsSnap.docs
+        .map((adminDoc) => adminDoc.id)
+        .filter((adminId) => adminId !== userId);
 
-        const adminUserSnap = await db.collection('users').doc(adminDoc.id).get();
-        if (adminUserSnap.exists && adminUserSnap.data().deviceInfo?.fcmToken) {
-          tokens.push(adminUserSnap.data().deviceInfo.fcmToken);
+      const adminUserSnaps = await Promise.all(
+        adminIds.map((adminId) => db.collection('users').doc(adminId).get())
+      );
+
+      const tokens = [];
+      for (const adminUserSnap of adminUserSnaps) {
+        const token = adminUserSnap.data()?.deviceInfo?.fcmToken;
+        if (token) {
+          tokens.push(token);
         }
       }
 
@@ -277,18 +296,15 @@ exports.generateInviteCode = onCall(async (request) => {
     throw new HttpsError('permission-denied', 'Only admins can generate invite codes');
   }
 
-  // Generate unique code
-  const inviteCode = generateRandomCode(6);
-  const expiresAt = new Date();
-  expiresAt.setDate(expiresAt.getDate() + 7); // Expires in 7 days
+  // Use the same invite code flow as the mobile app: families/{familyId}.inviteCode
+  const inviteCode = await generateUniqueFamilyInviteCode(6);
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
 
-  await db.collection('invites').doc(inviteCode).set({
-    familyId: familyId,
-    createdBy: request.auth.uid,
-    createdAt: FieldValue.serverTimestamp(),
-    expiresAt: expiresAt,
-    usedCount: 0,
-    maxUses: 10,
+  await db.collection('families').doc(familyId).update({
+    inviteCode: inviteCode,
+    inviteCodeExpiresAt: expiresAt,
+    inviteCodeGeneratedBy: request.auth.uid,
+    inviteCodeGeneratedAt: FieldValue.serverTimestamp(),
   });
 
   return {
@@ -308,17 +324,20 @@ exports.cleanupExpiredInvites = onSchedule('0 4 * * *', async (event) => {
   const now = new Date();
 
   const expiredInvites = await db
-    .collection('invites')
-    .where('expiresAt', '<', now)
+    .collection('families')
+    .where('inviteCodeExpiresAt', '<', now)
     .get();
 
   const batch = db.batch();
   expiredInvites.forEach((doc) => {
-    batch.delete(doc.ref);
+    batch.update(doc.ref, {
+      inviteCode: FieldValue.delete(),
+      inviteCodeExpiresAt: FieldValue.delete(),
+    });
   });
 
   await batch.commit();
-  console.log(`Deleted ${expiredInvites.size} expired invites`);
+  console.log(`Cleared ${expiredInvites.size} expired family invite codes`);
   return null;
 });
 
@@ -360,9 +379,28 @@ function generateRandomCode(length) {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Removed ambiguous chars
   let code = '';
   for (let i = 0; i < length; i++) {
-    code += chars.charAt(Math.floor(Math.random() * chars.length));
+    code += chars.charAt(crypto.randomInt(0, chars.length));
   }
   return code;
+}
+
+async function generateUniqueFamilyInviteCode(length) {
+  const maxAttempts = 10;
+
+  for (let i = 0; i < maxAttempts; i++) {
+    const code = generateRandomCode(length);
+    const existing = await db
+      .collection('families')
+      .where('inviteCode', '==', code)
+      .limit(1)
+      .get();
+
+    if (existing.empty) {
+      return code;
+    }
+  }
+
+  throw new HttpsError('internal', 'Failed to generate a unique invite code');
 }
 
 async function sendGeofenceNotification(familyId, userId, userName, geofence, eventType) {
@@ -376,13 +414,19 @@ async function sendGeofenceNotification(familyId, userId, userName, geofence, ev
     .where('role', '==', 'admin')
     .get();
 
-  const tokens = [];
-  for (const adminDoc of adminsSnap.docs) {
-    if (adminDoc.id === userId) continue;
+  const adminIds = adminsSnap.docs
+    .map((adminDoc) => adminDoc.id)
+    .filter((adminId) => adminId !== userId);
 
-    const userSnap = await db.collection('users').doc(adminDoc.id).get();
-    if (userSnap.exists && userSnap.data().deviceInfo?.fcmToken) {
-      tokens.push(userSnap.data().deviceInfo.fcmToken);
+  const adminUserSnaps = await Promise.all(
+    adminIds.map((adminId) => db.collection('users').doc(adminId).get())
+  );
+
+  const tokens = [];
+  for (const userSnap of adminUserSnaps) {
+    const token = userSnap.data()?.deviceInfo?.fcmToken;
+    if (token) {
+      tokens.push(token);
     }
   }
 

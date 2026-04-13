@@ -40,7 +40,7 @@ class BackgroundLocationService {
         initialNotificationTitle: 'FamilyNest',
         initialNotificationContent: 'Location sharing is active',
         foregroundServiceNotificationId: 888,
-        autoStartOnBoot: true,
+        autoStartOnBoot: false,
       ),
       iosConfiguration: IosConfiguration(
         autoStart: false,

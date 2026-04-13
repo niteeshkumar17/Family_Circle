@@ -73,7 +73,13 @@ class FamilyService {
     if (user == null) throw Exception('User not authenticated');
 
     final now = DateTime.now();
-    final inviteCode = await _generateUniqueInviteCode();
+    String inviteCode;
+    try {
+      inviteCode = await _generateUniqueInviteCode();
+    } catch (_) {
+      throw Exception('Unable to create family right now. Please try again.');
+    }
+
     // Create family document
     final familyRef = await _firestore.collection('families').add({
       'name': familyName,

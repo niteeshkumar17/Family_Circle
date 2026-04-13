@@ -21,6 +21,7 @@ class NotificationService {
   bool _isInitialized = false;
   String? _fcmToken;
   StreamSubscription? _tokenRefreshSubscription;
+  StreamSubscription<User?>? _authStateSubscription;
 
   /// Get FCM token
   String? get fcmToken => _fcmToken;
@@ -39,9 +40,16 @@ class NotificationService {
     _fcmToken = await _fcm.getToken();
 
     // Listen for token refresh
-    _tokenRefreshSubscription = _fcm.onTokenRefresh.listen((token) {
+    _tokenRefreshSubscription = _fcm.onTokenRefresh.listen((token) async {
       _fcmToken = token;
-      _updateTokenInFirestore(token);
+      await _updateTokenInFirestore(token);
+    });
+
+    // Sync existing token when a user signs in after initialization.
+    _authStateSubscription = FirebaseAuth.instance.authStateChanges().listen((user) async {
+      if (user != null && _fcmToken != null) {
+        await _updateTokenInFirestore(_fcmToken!);
+      }
     });
     
     // Update initial token in Firestore
@@ -77,6 +85,7 @@ class NotificationService {
           'fcmTokenUpdatedAt': FieldValue.serverTimestamp(),
           'deviceInfo': {
             'fcmToken': token,
+            'platform': _platformName(),
             'updatedAt': FieldValue.serverTimestamp(),
           },
         }, SetOptions(merge: true));
@@ -355,6 +364,24 @@ class NotificationService {
   /// Dispose
   void dispose() {
     _tokenRefreshSubscription?.cancel();
+    _authStateSubscription?.cancel();
+  }
+
+  String _platformName() {
+    switch (defaultTargetPlatform) {
+      case TargetPlatform.android:
+        return 'android';
+      case TargetPlatform.iOS:
+        return 'ios';
+      case TargetPlatform.macOS:
+        return 'macos';
+      case TargetPlatform.windows:
+        return 'windows';
+      case TargetPlatform.linux:
+        return 'linux';
+      case TargetPlatform.fuchsia:
+        return 'fuchsia';
+    }
   }
 }
 
