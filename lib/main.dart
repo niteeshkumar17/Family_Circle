@@ -29,8 +29,12 @@ void main() async {
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
     );
-  } catch (e) {
+  } catch (e, st) {
     debugPrint('Firebase initialization failed: $e');
+    debugPrintStack(stackTrace: st);
+
+    runApp(FirebaseInitializationErrorApp(error: e.toString()));
+    return;
   }
 
   // NOTE: NotificationService and BackgroundLocationService are now initialized
@@ -39,4 +43,47 @@ void main() async {
 
   // Run the app
   runApp(const FamilyNestApp());
+}
+
+class FirebaseInitializationErrorApp extends StatelessWidget {
+  const FirebaseInitializationErrorApp({super.key, required this.error});
+
+  final String error;
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: Scaffold(
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.error_outline, size: 64, color: Colors.red),
+                const SizedBox(height: 16),
+                const Text(
+                  'Unable to start FamilyNest',
+                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  'Firebase failed to initialize. Please check your network and app configuration, then restart the app.',
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  error,
+                  style: const TextStyle(color: Colors.black54, fontSize: 12),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }

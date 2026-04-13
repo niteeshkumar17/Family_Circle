@@ -27,6 +27,7 @@ class LocationService {
   String? _familyId;
   LocationData? _lastPosition;
   List<GeofenceModel> _activeGeofences = [];
+  final Map<String, bool> _foregroundGeofenceStates = {};
   int _currentBattery = 100;
   bool _isCharging = false;
   String _networkStatus = 'unknown';
@@ -227,14 +228,27 @@ class LocationService {
   /// Set active geofences for monitoring
   void setGeofences(List<GeofenceModel> geofences) {
     _activeGeofences = geofences.where((g) => g.isActive).toList();
+
+    // Remove stale geofence states that are no longer active.
+    final activeIds = _activeGeofences.map((g) => g.id).toSet();
+    _foregroundGeofenceStates.removeWhere((geofenceId, _) => !activeIds.contains(geofenceId));
   }
 
   /// Check if location triggers any geofences
   void _checkGeofences(LocationModel location) {
     for (final geofence in _activeGeofences) {
-      // final isInside = geofence.containsLocation(location);
-      // Geofence state management would be handled by the geofence service
-      // This is just for local monitoring
+      final isInside = geofence.containsLocation(location);
+      final wasInside = _foregroundGeofenceStates[geofence.id];
+
+      // Initialize without generating a false transition event.
+      if (wasInside == null) {
+        _foregroundGeofenceStates[geofence.id] = isInside;
+        continue;
+      }
+
+      if (wasInside != isInside) {
+        _foregroundGeofenceStates[geofence.id] = isInside;
+      }
     }
   }
 

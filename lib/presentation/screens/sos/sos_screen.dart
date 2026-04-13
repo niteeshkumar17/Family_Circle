@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
@@ -19,7 +22,11 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
   late AnimationController _pulseController;
   Duration _duration = Duration.zero;
   final FamilyService _familyService = FamilyService();
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   List<FamilyMemberData> _familyMembers = [];
+  StreamSubscription<List<FamilyMemberData>>? _familyMembersSubscription;
+  Timer? _durationTimer;
+  String? _activeSosEventId;
 
   @override
   void initState() {
@@ -34,7 +41,9 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
   Future<void> _loadFamilyMembers() async {
     final familyId = await _familyService.getCurrentUserFamilyId();
     if (familyId != null) {
-      _familyService.getFamilyMembersStream(familyId).listen((members) {
+      await _familyMembersSubscription?.cancel();
+      _familyMembersSubscription =
+          _familyService.getFamilyMembersStream(familyId).listen((members) {
         if (mounted) {
           setState(() {
             _familyMembers = members;
@@ -46,6 +55,8 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    _familyMembersSubscription?.cancel();
+    _durationTimer?.cancel();
     _pulseController.dispose();
     super.dispose();
   }
@@ -71,7 +82,7 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
         
         Future.delayed(const Duration(seconds: 1), () {
           if (!mounted || !_isConfirming) return;
-          _triggerSOS();
+          unawaited(_triggerSOS());
         });
       });
     });
@@ -84,7 +95,7 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
     });
   }
 
-  void _triggerSOS() {
+  Future<void> _triggerSOS() async {
     HapticFeedback.heavyImpact();
     setState(() {
       _isConfirming = false;
@@ -95,13 +106,56 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
     _startDurationTimer();
 
     // Send SOS notification to all family members
-    _sendSOSToFamily();
+    await _sendSOSToFamily();
   }
 
   Future<void> _sendSOSToFamily() async {
-    // The SOS state is active, family members will see it through location updates
-    // In a full implementation, this would send push notifications to all family members
-    debugPrint('SOS triggered - notifying family members');
+    final familyId = await _familyService.getCurrentUserFamilyId();
+    final userId = _familyService.currentUserId;
+
+    if (familyId == null || userId == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Unable to send SOS: missing family or user')),
+        );
+      }
+      return;
+    }
+
+    FamilyMemberData? currentMember;
+    for (final member in _familyMembers) {
+      if (member.id == userId) {
+        currentMember = member;
+        break;
+      }
+    }
+
+    final payload = <String, dynamic>{
+      'familyId': familyId,
+      'userId': userId,
+      'userName': _familyService.currentUserName ?? 'A family member',
+      'createdAt': FieldValue.serverTimestamp(),
+      'status': 'active',
+    };
+
+    if (currentMember?.latitude != null && currentMember?.longitude != null) {
+      payload['triggerLocation'] = {
+        'latitude': currentMember!.latitude,
+        'longitude': currentMember.longitude,
+      };
+    }
+
+    try {
+      final eventRef = await _firestore.collection('sos_events').add(payload);
+      _activeSosEventId = eventRef.id;
+    } catch (e) {
+      debugPrint('Failed to create SOS event: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to notify family. Please call emergency services.')),
+        );
+      }
+    }
   }
 
   Future<void> _callEmergency() async {
@@ -118,13 +172,33 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
   }
 
   void _startDurationTimer() {
-    Future.delayed(const Duration(seconds: 1), () {
-      if (!mounted || !_isSOSActive) return;
+    _durationTimer?.cancel();
+    _durationTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted || !_isSOSActive) {
+        timer.cancel();
+        return;
+      }
+
       setState(() {
         _duration += const Duration(seconds: 1);
       });
-      _startDurationTimer();
     });
+  }
+
+  Future<void> _closeActiveSosEvent() async {
+    final eventId = _activeSosEventId;
+    if (eventId == null) return;
+
+    try {
+      await _firestore.collection('sos_events').doc(eventId).update({
+        'status': 'cancelled',
+        'resolvedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      debugPrint('Failed to close SOS event: $e');
+    } finally {
+      _activeSosEventId = null;
+    }
   }
 
   void _cancelSOS() {
@@ -145,6 +219,8 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
                 _isSOSActive = false;
                 _duration = Duration.zero;
               });
+              _durationTimer?.cancel();
+              unawaited(_closeActiveSosEvent());
               Navigator.pop(context);
             },
             style: ElevatedButton.styleFrom(

@@ -8,7 +8,9 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:battery_plus/battery_plus.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:permission_handler/permission_handler.dart' as permission_handler;
 import '../config/app_config.dart';
+import '../firebase_options.dart';
 import 'dart:math' as math;
 
 /// Background Location Service
@@ -106,7 +108,11 @@ Future<void> onStart(ServiceInstance service) async {
   DartPluginRegistrant.ensureInitialized();
 
   // Initialize Firebase in background isolate
-  await Firebase.initializeApp();
+  if (Firebase.apps.isEmpty) {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+  }
 
   // State variables
   String? userId;
@@ -116,6 +122,7 @@ Future<void> onStart(ServiceInstance service) async {
   bool sosMode = false;
   LocationData? lastPosition;
   DateTime? lastUpdateTime;
+  String? _presenceRegisteredUserId;
 
   // Services
   final battery = Battery();
@@ -124,10 +131,28 @@ Future<void> onStart(ServiceInstance service) async {
   final prefs = await SharedPreferences.getInstance();
   final location = Location();
 
+  Future<void> configurePresenceOnDisconnect(String uid) async {
+    if (_presenceRegisteredUserId != null && _presenceRegisteredUserId != uid) {
+      await database.ref('presence/$_presenceRegisteredUserId').onDisconnect().cancel();
+    }
+
+    final presenceRef = database.ref('presence/$uid');
+    await presenceRef.onDisconnect().update({
+      'online': false,
+      'lastSeen': ServerValue.timestamp,
+      'appState': 'offline',
+    });
+    _presenceRegisteredUserId = uid;
+  }
+
   // Load saved state
   userId = prefs.getString('userId');
   familyId = prefs.getString('familyId');
   locationSharingEnabled = prefs.getBool('locationSharingEnabled') ?? true;
+
+  if (userId != null && userId!.isNotEmpty) {
+    await configurePresenceOnDisconnect(userId!);
+  }
 
   try {
     await location.enableBackgroundMode(enable: true);
@@ -151,23 +176,51 @@ Future<void> onStart(ServiceInstance service) async {
     });
   }
 
-  service.on('stopService').listen((event) {
+  service.on('stopService').listen((event) async {
+    if (userId != null && userId!.isNotEmpty) {
+      await database.ref('presence/$userId').set({
+        'online': false,
+        'lastSeen': DateTime.now().millisecondsSinceEpoch,
+        'appState': 'stopped',
+      });
+      await database.ref('presence/$userId').onDisconnect().cancel();
+      _presenceRegisteredUserId = null;
+    }
     service.stopSelf();
   });
 
-  service.on('setUserId').listen((event) {
+  service.on('setUserId').listen((event) async {
     userId = event?['userId'];
-    prefs.setString('userId', userId ?? '');
+    if (userId == null || userId!.isEmpty) {
+      final previousUserId = _presenceRegisteredUserId;
+      if (previousUserId != null) {
+        await database.ref('presence/$previousUserId').set({
+          'online': false,
+          'lastSeen': DateTime.now().millisecondsSinceEpoch,
+          'appState': 'signed_out',
+        });
+        await database.ref('presence/$previousUserId').onDisconnect().cancel();
+        _presenceRegisteredUserId = null;
+      }
+      await prefs.remove('userId');
+    } else {
+      await prefs.setString('userId', userId!);
+      await configurePresenceOnDisconnect(userId!);
+    }
   });
 
-  service.on('setFamilyId').listen((event) {
+  service.on('setFamilyId').listen((event) async {
     familyId = event?['familyId'];
-    prefs.setString('familyId', familyId ?? '');
+    if (familyId == null || familyId!.isEmpty) {
+      await prefs.remove('familyId');
+    } else {
+      await prefs.setString('familyId', familyId!);
+    }
   });
 
-  service.on('setLocationSharing').listen((event) {
+  service.on('setLocationSharing').listen((event) async {
     locationSharingEnabled = event?['enabled'] ?? true;
-    prefs.setBool('locationSharingEnabled', locationSharingEnabled);
+    await prefs.setBool('locationSharingEnabled', locationSharingEnabled);
   });
 
   service.on('setInterval').listen((event) {
@@ -281,7 +334,7 @@ Future<void> onStart(ServiceInstance service) async {
 
   // Presence heartbeat - update every minute
   Timer.periodic(const Duration(minutes: 1), (timer) async {
-    if (userId == null) return;
+    if (userId == null || userId!.isEmpty) return;
     
     try {
       await database.ref('presence/$userId').set({
@@ -289,6 +342,8 @@ Future<void> onStart(ServiceInstance service) async {
         'lastSeen': DateTime.now().millisecondsSinceEpoch,
         'appState': 'background',
       });
+
+      await configurePresenceOnDisconnect(userId!);
     } catch (e) {
       if (kDebugMode) {
         print('Presence update failed: $e');
@@ -437,14 +492,16 @@ class LocationPermissionHelper {
 
   /// Open location settings
   static Future<bool> openLocationSettings() async {
-    // location package doesn't have openSettings directly exposed in same way
-    // Assuming true for now or implementation dependent
-    return true; 
+    bool serviceEnabled = await _location.serviceEnabled();
+    if (serviceEnabled) {
+      return true;
+    }
+    serviceEnabled = await _location.requestService();
+    return serviceEnabled;
   }
 
   /// Open app settings
   static Future<bool> openAppSettings() async {
-     // location package doesn't have openAppSettings directly exposed
-     return true; 
+     return permission_handler.openAppSettings();
   }
 }

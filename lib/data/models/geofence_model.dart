@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:json_annotation/json_annotation.dart';
@@ -133,51 +135,14 @@ class GeofenceModel {
     const double earthRadius = 6371000;
     final dLat = _toRadians(lat2 - lat1);
     final dLon = _toRadians(lon2 - lon1);
-    final a = _sin(dLat / 2) * _sin(dLat / 2) +
-        _cos(_toRadians(lat1)) * _cos(_toRadians(lat2)) *
-        _sin(dLon / 2) * _sin(dLon / 2);
-    final c = 2 * _atan2(_sqrt(a), _sqrt(1 - a));
+    final a = math.sin(dLat / 2) * math.sin(dLat / 2) +
+        math.cos(_toRadians(lat1)) * math.cos(_toRadians(lat2)) *
+        math.sin(dLon / 2) * math.sin(dLon / 2);
+    final c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
     return earthRadius * c;
   }
 
-  static double _toRadians(double deg) => deg * 3.141592653589793 / 180;
-  static double _sin(double x) {
-    x = x % (2 * 3.141592653589793);
-    double result = 0, term = x;
-    for (int n = 1; n <= 10; n++) {
-      result += term;
-      term *= -x * x / ((2 * n) * (2 * n + 1));
-    }
-    return result;
-  }
-  static double _cos(double x) => _sin(x + 3.141592653589793 / 2);
-  static double _sqrt(double x) {
-    if (x <= 0) return 0;
-    double guess = x / 2;
-    for (int i = 0; i < 10; i++) {
-      guess = (guess + x / guess) / 2;
-    }
-    return guess;
-  }
-  static double _atan2(double y, double x) {
-    if (x > 0) return _atan(y / x);
-    if (x < 0 && y >= 0) return _atan(y / x) + 3.141592653589793;
-    if (x < 0 && y < 0) return _atan(y / x) - 3.141592653589793;
-    if (x == 0 && y > 0) return 3.141592653589793 / 2;
-    if (x == 0 && y < 0) return -3.141592653589793 / 2;
-    return 0;
-  }
-  static double _atan(double x) {
-    if (x.abs() > 1) {
-      return (x > 0 ? 1 : -1) * (3.141592653589793 / 2 - _atan(1 / x));
-    }
-    double result = 0, term = x;
-    for (int n = 0; n < 20; n++) {
-      result += term / (2 * n + 1) * (n % 2 == 0 ? 1 : -1);
-      term *= x * x;
-    }
-    return result;
-  }
+  static double _toRadians(double deg) => deg * math.pi / 180;
 
   static DateTime _dateTimeFromTimestamp(dynamic timestamp) {
     if (timestamp is Timestamp) return timestamp.toDate();

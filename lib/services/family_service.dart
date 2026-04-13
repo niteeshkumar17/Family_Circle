@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
@@ -72,13 +73,14 @@ class FamilyService {
     if (user == null) throw Exception('User not authenticated');
 
     final now = DateTime.now();
+    final inviteCode = await _generateUniqueInviteCode();
     // Create family document
     final familyRef = await _firestore.collection('families').add({
       'name': familyName,
       'createdBy': user.uid,
       'createdByName': user.displayName ?? 'User',
       'createdAt': FieldValue.serverTimestamp(),
-      'inviteCode': _generateInviteCode(),
+      'inviteCode': inviteCode,
       'inviteCodeExpiresAt': Timestamp.fromDate(now.add(const Duration(hours: 24))),
       'memberIds': [user.uid],
     });
@@ -131,20 +133,26 @@ class FamilyService {
       throw Exception('Invite code has expired. Ask the family admin to generate a new code.');
     }
 
-    // Add user to family
-    await familyDoc.reference.collection('members').doc(user.uid).set({
-      'userId': user.uid,
-      'displayName': user.displayName ?? 'User',
-      'photoUrl': user.photoURL,
-      'role': 'member',
-      'joinedAt': FieldValue.serverTimestamp(),
-      'locationSharingEnabled': true,
-    });
+    // Avoid downgrading roles or resetting metadata if the user already joined.
+    final existingMember =
+        await familyDoc.reference.collection('members').doc(user.uid).get();
 
-    // Update family memberIds
-    await familyDoc.reference.update({
-      'memberIds': FieldValue.arrayUnion([user.uid]),
-    });
+    if (!existingMember.exists) {
+      // Add user to family
+      await familyDoc.reference.collection('members').doc(user.uid).set({
+        'userId': user.uid,
+        'displayName': user.displayName ?? 'User',
+        'photoUrl': user.photoURL,
+        'role': 'member',
+        'joinedAt': FieldValue.serverTimestamp(),
+        'locationSharingEnabled': true,
+      });
+
+      // Update family memberIds
+      await familyDoc.reference.update({
+        'memberIds': FieldValue.arrayUnion([user.uid]),
+      });
+    }
 
     // Update user document
     await _firestore.collection('users').doc(user.uid).update({
@@ -161,12 +169,28 @@ class FamilyService {
   /// Generate a random invite code
   String _generateInviteCode() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    final random = DateTime.now().millisecondsSinceEpoch;
-    String code = '';
-    for (int i = 0; i < 6; i++) {
-      code += chars[(random + i * 7) % chars.length];
+    final random = Random.secure();
+    return List.generate(6, (_) => chars[random.nextInt(chars.length)]).join();
+  }
+
+  /// Generate an invite code that does not already exist.
+  Future<String> _generateUniqueInviteCode() async {
+    const maxAttempts = 5;
+
+    for (int attempt = 0; attempt < maxAttempts; attempt++) {
+      final code = _generateInviteCode();
+      final existing = await _firestore
+          .collection('families')
+          .where('inviteCode', isEqualTo: code)
+          .limit(1)
+          .get();
+
+      if (existing.docs.isEmpty) {
+        return code;
+      }
     }
-    return code;
+
+    throw Exception('Failed to generate a unique invite code. Please try again.');
   }
 
   /// Start listening to family members
@@ -352,7 +376,7 @@ class FamilyService {
   Future<String> regenerateInviteCode() async {
     if (_currentFamilyId == null) throw Exception('No family selected');
     
-    final newCode = _generateInviteCode();
+    final newCode = await _generateUniqueInviteCode();
     final expiresAt = DateTime.now().add(const Duration(hours: 24));
     
     await _firestore.collection('families').doc(_currentFamilyId).update({
