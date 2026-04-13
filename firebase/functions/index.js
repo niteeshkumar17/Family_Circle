@@ -137,13 +137,21 @@ exports.broadcastSOS = onDocumentCreated('sos_events/{eventId}', async (event) =
     recipientIds.map((memberId) => db.collection('users').doc(memberId).get())
   );
 
-  const tokens = [];
-  for (const userSnap of recipientUserSnaps) {
-    const token = userSnap.data()?.deviceInfo?.fcmToken;
-    if (token) {
-      tokens.push(token);
-    }
-  }
+  const recipientTokenEntries = recipientUserSnaps
+    .map((userSnap, index) => {
+      const token = userSnap.data()?.deviceInfo?.fcmToken;
+      if (!token) {
+        return null;
+      }
+
+      return {
+        userId: recipientIds[index],
+        token,
+      };
+    })
+    .filter(Boolean);
+
+  const tokens = recipientTokenEntries.map((entry) => entry.token);
 
   const notificationPromises = recipientIds.map((memberId) => {
     return db.collection('notifications').doc(memberId)
@@ -165,7 +173,7 @@ exports.broadcastSOS = onDocumentCreated('sos_events/{eventId}', async (event) =
 
   // Send FCM notifications
   if (tokens.length > 0) {
-    await messaging.sendEachForMulticast({
+    const batchResponse = await messaging.sendEachForMulticast({
       tokens: tokens,
       notification: {
         title: '🚨 SOS EMERGENCY',
@@ -197,6 +205,8 @@ exports.broadcastSOS = onDocumentCreated('sos_events/{eventId}', async (event) =
         },
       },
     });
+
+    await cleanupInvalidFcmTokens(recipientTokenEntries, batchResponse);
   }
 
   await Promise.all(notificationPromises);
@@ -239,16 +249,24 @@ exports.checkLowBattery = onValueUpdated(
         adminIds.map((adminId) => db.collection('users').doc(adminId).get())
       );
 
-      const tokens = [];
-      for (const adminUserSnap of adminUserSnaps) {
-        const token = adminUserSnap.data()?.deviceInfo?.fcmToken;
-        if (token) {
-          tokens.push(token);
-        }
-      }
+      const adminTokenEntries = adminUserSnaps
+        .map((adminUserSnap, index) => {
+          const token = adminUserSnap.data()?.deviceInfo?.fcmToken;
+          if (!token) {
+            return null;
+          }
+
+          return {
+            userId: adminIds[index],
+            token,
+          };
+        })
+        .filter(Boolean);
+
+      const tokens = adminTokenEntries.map((entry) => entry.token);
 
       if (tokens.length > 0) {
-        await messaging.sendEachForMulticast({
+        const batchResponse = await messaging.sendEachForMulticast({
           tokens: tokens,
           notification: {
             title: '🔋 Low Battery Alert',
@@ -265,6 +283,8 @@ exports.checkLowBattery = onValueUpdated(
             },
           },
         });
+
+        await cleanupInvalidFcmTokens(adminTokenEntries, batchResponse);
       }
     }
 
@@ -322,22 +342,37 @@ exports.generateInviteCode = onCall(async (request) => {
  */
 exports.cleanupExpiredInvites = onSchedule('0 4 * * *', async (event) => {
   const now = new Date();
+  const pageSize = 400;
+  let totalCleared = 0;
 
-  const expiredInvites = await db
-    .collection('families')
-    .where('inviteCodeExpiresAt', '<', now)
-    .get();
+  while (true) {
+    const expiredInvites = await db
+      .collection('families')
+      .where('inviteCodeExpiresAt', '<', now)
+      .limit(pageSize)
+      .get();
 
-  const batch = db.batch();
-  expiredInvites.forEach((doc) => {
-    batch.update(doc.ref, {
-      inviteCode: FieldValue.delete(),
-      inviteCodeExpiresAt: FieldValue.delete(),
+    if (expiredInvites.empty) {
+      break;
+    }
+
+    const batch = db.batch();
+    expiredInvites.docs.forEach((doc) => {
+      batch.update(doc.ref, {
+        inviteCode: FieldValue.delete(),
+        inviteCodeExpiresAt: FieldValue.delete(),
+      });
     });
-  });
 
-  await batch.commit();
-  console.log(`Cleared ${expiredInvites.size} expired family invite codes`);
+    await batch.commit();
+    totalCleared += expiredInvites.size;
+
+    if (expiredInvites.size < pageSize) {
+      break;
+    }
+  }
+
+  console.log(`Cleared ${totalCleared} expired family invite codes`);
   return null;
 });
 
@@ -403,6 +438,67 @@ async function generateUniqueFamilyInviteCode(length) {
   throw new HttpsError('internal', 'Failed to generate a unique invite code');
 }
 
+function isStaleFcmError(error) {
+  const code = error?.code;
+  return code === 'messaging/registration-token-not-registered' ||
+    code === 'messaging/invalid-registration-token';
+}
+
+async function cleanupInvalidFcmTokens(tokenEntries, batchResponse) {
+  if (!tokenEntries.length || !batchResponse?.responses?.length) {
+    return;
+  }
+
+  const staleTokenByUser = new Map();
+  batchResponse.responses.forEach((response, index) => {
+    if (!response.success && isStaleFcmError(response.error)) {
+      const entry = tokenEntries[index];
+      if (entry?.userId && entry?.token) {
+        staleTokenByUser.set(entry.userId, entry.token);
+      }
+    }
+  });
+
+  if (staleTokenByUser.size === 0) {
+    return;
+  }
+
+  const staleUserIds = Array.from(staleTokenByUser.keys());
+  const staleUserSnaps = await Promise.all(
+    staleUserIds.map((userId) => db.collection('users').doc(userId).get())
+  );
+
+  const batch = db.batch();
+  let updates = 0;
+
+  staleUserSnaps.forEach((userSnap, index) => {
+    if (!userSnap.exists) {
+      return;
+    }
+
+    const userId = staleUserIds[index];
+    const staleToken = staleTokenByUser.get(userId);
+    const currentToken = userSnap.data()?.deviceInfo?.fcmToken;
+
+    // Avoid deleting if the token changed after this send operation started.
+    if (!currentToken || currentToken !== staleToken) {
+      return;
+    }
+
+    batch.update(userSnap.ref, {
+      'deviceInfo.fcmToken': FieldValue.delete(),
+      'deviceInfo.updatedAt': FieldValue.serverTimestamp(),
+      fcmToken: FieldValue.delete(),
+      fcmTokenUpdatedAt: FieldValue.serverTimestamp(),
+    });
+    updates++;
+  });
+
+  if (updates > 0) {
+    await batch.commit();
+  }
+}
+
 async function sendGeofenceNotification(familyId, userId, userName, geofence, eventType) {
   const action = eventType === 'entry' ? 'arrived at' : 'left';
 
@@ -422,16 +518,24 @@ async function sendGeofenceNotification(familyId, userId, userName, geofence, ev
     adminIds.map((adminId) => db.collection('users').doc(adminId).get())
   );
 
-  const tokens = [];
-  for (const userSnap of adminUserSnaps) {
-    const token = userSnap.data()?.deviceInfo?.fcmToken;
-    if (token) {
-      tokens.push(token);
-    }
-  }
+  const adminTokenEntries = adminUserSnaps
+    .map((userSnap, index) => {
+      const token = userSnap.data()?.deviceInfo?.fcmToken;
+      if (!token) {
+        return null;
+      }
+
+      return {
+        userId: adminIds[index],
+        token,
+      };
+    })
+    .filter(Boolean);
+
+  const tokens = adminTokenEntries.map((entry) => entry.token);
 
   if (tokens.length > 0) {
-    await messaging.sendEachForMulticast({
+    const batchResponse = await messaging.sendEachForMulticast({
       tokens: tokens,
       notification: {
         title: eventType === 'entry' ? '📍 Arrival' : '🚶 Departure',
@@ -448,5 +552,7 @@ async function sendGeofenceNotification(familyId, userId, userName, geofence, ev
         },
       },
     });
+
+    await cleanupInvalidFcmTokens(adminTokenEntries, batchResponse);
   }
 }

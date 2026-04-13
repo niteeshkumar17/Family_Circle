@@ -497,7 +497,13 @@ class LocationPermissionHelper {
       return true;
     }
     serviceEnabled = await _location.requestService();
-    return serviceEnabled;
+    if (serviceEnabled) {
+      return true;
+    }
+
+    // If the system location dialog was dismissed/denied, at least route the
+    // user to app settings so permission UX can continue.
+    return permission_handler.openAppSettings();
   }
 
   /// Open app settings
