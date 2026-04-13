@@ -54,7 +54,7 @@ class NotificationService {
     
     // Update initial token in Firestore
     if (_fcmToken != null) {
-      _updateTokenInFirestore(_fcmToken!);
+      await _updateTokenInFirestore(_fcmToken!);
     }
 
     // Handle foreground messages
