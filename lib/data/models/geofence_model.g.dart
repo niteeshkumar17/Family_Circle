@@ -50,6 +50,8 @@ GeofenceSettings _$GeofenceSettingsFromJson(Map<String, dynamic> json) =>
     GeofenceSettings(
       notifyOnEntry: json['notifyOnEntry'] as bool? ?? true,
       notifyOnExit: json['notifyOnExit'] as bool? ?? true,
+      notifyOnDwell: json['notifyOnDwell'] as bool? ?? true,
+      dwellTimeSeconds: (json['dwellTimeSeconds'] as num?)?.toInt() ?? 0,
       notifyMembers: (json['notifyMembers'] as List<dynamic>?)
               ?.map((e) => e as String)
               .toList() ??
@@ -65,6 +67,8 @@ Map<String, dynamic> _$GeofenceSettingsToJson(GeofenceSettings instance) =>
     <String, dynamic>{
       'notifyOnEntry': instance.notifyOnEntry,
       'notifyOnExit': instance.notifyOnExit,
+      'notifyOnDwell': instance.notifyOnDwell,
+      'dwellTimeSeconds': instance.dwellTimeSeconds,
       'notifyMembers': instance.notifyMembers,
       'enableQuietHours': instance.enableQuietHours,
       'quietStart': GeofenceSettings._timeOfDayToJson(instance.quietStart),

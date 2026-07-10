@@ -15,6 +15,10 @@ class AppConfig {
   static const double minGeofenceRadiusMeters = 50;
   static const double maxGeofenceRadiusMeters = 1000;
   
+  // Geofence advanced settings
+  static const double geofenceHysteresisMeters = 20.0; // Cushion to prevent boundary flapping
+  static const int geofenceDwellTimeSeconds = 180;      // 3 minutes before dwell alert fires
+  
   // History settings
   static const int locationHistoryDays = 30;
   
@@ -24,4 +28,9 @@ class AppConfig {
   // Family settings
   static const int maxFreeFamilyMembers = 5;
   static const int maxPremiumFamilyMembers = 20;
+  
+  // Offline cache settings
+  static const int maxCachedLocations = 1000;
+  static const int offlineBatchUploadSize = 50;
+  static const int cachedLocationRetentionDays = 7;
 }

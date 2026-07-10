@@ -11,6 +11,7 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:permission_handler/permission_handler.dart' as permission_handler;
 import '../config/app_config.dart';
 import '../firebase_options.dart';
+import 'location_cache_service.dart';
 import 'dart:math' as math;
 
 /// Background Location Service
@@ -322,10 +323,30 @@ Future<void> onStart(ServiceInstance service) async {
         'isActive': true,
       };
 
-      // Update Firebase Realtime Database
-      await database
-          .ref('locations/$familyId/$userId')
-          .set(locationData);
+      // Update Firebase Realtime Database (with offline cache fallback)
+      bool firebasePushSucceeded = false;
+      try {
+        await database
+            .ref('locations/$familyId/$userId')
+            .set(locationData);
+        firebasePushSucceeded = true;
+      } catch (pushError) {
+        // Firebase unreachable — cache locally for later upload
+        if (kDebugMode) {
+          print('Firebase push failed, caching locally: $pushError');
+        }
+        try {
+          await LocationCacheService().cacheLocation(
+            userId: userId!,
+            familyId: familyId!,
+            locationData: locationData,
+          );
+        } catch (cacheError) {
+          if (kDebugMode) {
+            print('Local cache also failed: $cacheError');
+          }
+        }
+      }
 
       // Update state
       lastPosition = position;
@@ -333,11 +354,15 @@ Future<void> onStart(ServiceInstance service) async {
 
       // Update notification
       if (service is AndroidServiceInstance) {
+        final pendingCount = firebasePushSucceeded
+            ? 0
+            : await LocationCacheService().getPendingCount();
+        final cacheInfo = pendingCount > 0 ? ' ($pendingCount cached)' : '';
         service.setForegroundNotificationInfo(
           title: 'FamilyNest',
           content: sosMode
               ? '🚨 SOS Mode - Tracking every ${trackingIntervalSeconds}s'
-              : '📍 Location sharing active',
+              : '📍 Location sharing active$cacheInfo',
         );
       }
 
@@ -370,6 +395,60 @@ Future<void> onStart(ServiceInstance service) async {
     } catch (e) {
       if (kDebugMode) {
         print('Presence update failed: $e');
+      }
+    }
+  });
+
+  // Connectivity listener — batch upload cached locations when back online
+  connectivity.onConnectivityChanged.listen((result) async {
+    final isOnline = result.contains(ConnectivityResult.wifi) ||
+        result.contains(ConnectivityResult.mobile);
+
+    if (!isOnline || userId == null || familyId == null) return;
+
+    try {
+      final cache = LocationCacheService();
+      final pendingCount = await cache.getPendingCount();
+      if (pendingCount == 0) return;
+
+      if (kDebugMode) {
+        print('Back online — uploading $pendingCount cached locations...');
+      }
+
+      // Upload in batches
+      while (true) {
+        final batch = await cache.getPendingLocations();
+        if (batch.isEmpty) break;
+
+        final syncedIds = <int>[];
+        for (final row in batch) {
+          try {
+            final data = cache.rowToLocationData(row);
+            await database
+                .ref('locations/${row['family_id']}/${row['user_id']}')
+                .set(data);
+            syncedIds.add(row['id'] as int);
+          } catch (e) {
+            // Stop batch on first failure (still offline?)
+            break;
+          }
+        }
+
+        if (syncedIds.isNotEmpty) {
+          await cache.markAsSynced(syncedIds);
+        }
+
+        // If we couldn't sync any, connection is still bad
+        if (syncedIds.length < batch.length) break;
+      }
+
+      if (kDebugMode) {
+        final remaining = await cache.getPendingCount();
+        print('Cache upload complete. Remaining: $remaining');
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        print('Cache upload failed: $e');
       }
     }
   });

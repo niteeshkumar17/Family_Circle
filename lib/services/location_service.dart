@@ -323,25 +323,36 @@ class LocationService {
   }
 }
 
-/// Geofence Monitoring Service
+/// Geofence Monitoring Service with hysteresis and dwell-time logic
 class GeofenceService {
   static final GeofenceService _instance = GeofenceService._internal();
   factory GeofenceService() => _instance;
   GeofenceService._internal();
 
   final _eventController = StreamController<GeofenceEvent>.broadcast();
-  final Map<String, bool> _geofenceStates = {}; // geofenceId -> isInside
+
+  /// Per-geofence tracking state: geofenceId -> state
+  final Map<String, _GeofenceTrackingState> _trackingStates = {};
 
   /// Stream of geofence events
   Stream<GeofenceEvent> get eventStream => _eventController.stream;
 
-  /// Check location against geofences
+  /// Check location against geofences using hysteresis + dwell-time logic.
+  ///
+  /// **Hysteresis**: Entry requires distance < (radius - cushion). Exit requires
+  /// distance > (radius + cushion). This creates a dead zone at the boundary
+  /// where GPS drift won't trigger false transitions.
+  ///
+  /// **Dwell-Time**: After a boundary crossing is detected, the alert only fires
+  /// once the user has remained in the new state for [dwellTimeSeconds]. If they
+  /// bounce back before the timer expires, the pending transition is cancelled.
   List<GeofenceEvent> checkGeofences(
     LocationModel location,
     List<GeofenceModel> geofences,
     String userName,
   ) {
     final events = <GeofenceEvent>[];
+    final now = DateTime.now();
 
     for (final geofence in geofences) {
       if (!geofence.isActive) continue;
@@ -352,50 +363,145 @@ class GeofenceService {
         continue;
       }
 
-      final isInside = geofence.containsLocation(location);
-      final wasInside = _geofenceStates[geofence.id] ?? false;
+      // Get or create tracking state for this geofence
+      final state = _trackingStates.putIfAbsent(
+        geofence.id,
+        () => _GeofenceTrackingState(),
+      );
 
-      if (isInside != wasInside) {
-        // State changed
-        final eventType = isInside
-            ? GeofenceEventType.entry
-            : GeofenceEventType.exit;
+      // Use hysteresis thresholds
+      final isDeepInside = geofence.isDeepInside(location);
+      final isClearlyOutside = geofence.isClearlyOutside(location);
+      final dwellSeconds = geofence.settings.effectiveDwellTimeSeconds;
 
-        // Check quiet hours
-        if (geofence.settings.isInQuietHours()) {
-          continue; // Skip notification during quiet hours
+      // --- State machine ---
+
+      if (!state.isInitialized) {
+        // First check: initialize without generating events
+        state.isInside = geofence.containsLocation(location);
+        state.isInitialized = true;
+        continue;
+      }
+
+      if (state.isInside) {
+        // Currently INSIDE — check for exit
+        if (isClearlyOutside) {
+          if (state.pendingTransitionTime == null) {
+            // Start exit dwell timer
+            state.pendingTransitionTime = now;
+            state.pendingIsEntry = false;
+          } else if (!state.pendingIsEntry! &&
+              now.difference(state.pendingTransitionTime!).inSeconds >= dwellSeconds) {
+            // Dwell time elapsed — confirm exit
+            state.isInside = false;
+            state.pendingTransitionTime = null;
+            state.pendingIsEntry = null;
+            state.dwellAlertFired = false;
+
+            if (geofence.settings.notifyOnExit && !geofence.settings.isInQuietHours()) {
+              final event = _createEvent(geofence, location, userName, GeofenceEventType.exit);
+              events.add(event);
+              _eventController.add(event);
+            }
+          }
+        } else {
+          // User is still inside (or in dead zone) — cancel any pending exit
+          if (state.pendingTransitionTime != null && state.pendingIsEntry == false) {
+            state.pendingTransitionTime = null;
+            state.pendingIsEntry = null;
+          }
+
+          // Check for dwell alert (sustained presence)
+          if (!state.dwellAlertFired && state.entryConfirmedTime != null) {
+            if (now.difference(state.entryConfirmedTime!).inSeconds >= dwellSeconds) {
+              state.dwellAlertFired = true;
+              if (geofence.settings.notifyOnDwell && !geofence.settings.isInQuietHours()) {
+                final event = _createEvent(geofence, location, userName, GeofenceEventType.dwell);
+                events.add(event);
+                _eventController.add(event);
+              }
+            }
+          }
         }
+      } else {
+        // Currently OUTSIDE — check for entry
+        if (isDeepInside) {
+          if (state.pendingTransitionTime == null) {
+            // Start entry dwell timer
+            state.pendingTransitionTime = now;
+            state.pendingIsEntry = true;
+          } else if (state.pendingIsEntry! &&
+              now.difference(state.pendingTransitionTime!).inSeconds >= dwellSeconds) {
+            // Dwell time elapsed — confirm entry
+            state.isInside = true;
+            state.entryConfirmedTime = now;
+            state.pendingTransitionTime = null;
+            state.pendingIsEntry = null;
+            state.dwellAlertFired = false;
 
-        final event = GeofenceEvent(
-          id: '${geofence.id}_${DateTime.now().millisecondsSinceEpoch}',
-          geofenceId: geofence.id,
-          geofenceName: geofence.name,
-          userId: location.userId,
-          userName: userName,
-          eventType: eventType,
-          timestamp: DateTime.now(),
-          latitude: location.latitude,
-          longitude: location.longitude,
-        );
-
-        events.add(event);
-        _eventController.add(event);
-
-        // Update state
-        _geofenceStates[geofence.id] = isInside;
+            if (geofence.settings.notifyOnEntry && !geofence.settings.isInQuietHours()) {
+              final event = _createEvent(geofence, location, userName, GeofenceEventType.entry);
+              events.add(event);
+              _eventController.add(event);
+            }
+          }
+        } else {
+          // User is still outside (or in dead zone) — cancel any pending entry
+          if (state.pendingTransitionTime != null && state.pendingIsEntry == true) {
+            state.pendingTransitionTime = null;
+            state.pendingIsEntry = null;
+          }
+        }
       }
     }
 
     return events;
   }
 
+  GeofenceEvent _createEvent(
+    GeofenceModel geofence,
+    LocationModel location,
+    String userName,
+    GeofenceEventType eventType,
+  ) {
+    return GeofenceEvent(
+      id: '${geofence.id}_${DateTime.now().millisecondsSinceEpoch}',
+      geofenceId: geofence.id,
+      geofenceName: geofence.name,
+      userId: location.userId,
+      userName: userName,
+      eventType: eventType,
+      timestamp: DateTime.now(),
+      latitude: location.latitude,
+      longitude: location.longitude,
+    );
+  }
+
   /// Reset geofence states (e.g., when switching families)
   void resetStates() {
-    _geofenceStates.clear();
+    _trackingStates.clear();
   }
 
   /// Dispose
   void dispose() {
     _eventController.close();
   }
+}
+
+/// Internal tracking state for a single geofence
+class _GeofenceTrackingState {
+  bool isInitialized = false;
+  bool isInside = false;
+
+  /// When a boundary crossing was first detected (dwell timer start)
+  DateTime? pendingTransitionTime;
+
+  /// true = pending entry, false = pending exit, null = no pending transition
+  bool? pendingIsEntry;
+
+  /// When entry was confirmed (for dwell alert timing)
+  DateTime? entryConfirmedTime;
+
+  /// Whether the dwell alert has already been fired for the current visit
+  bool dwellAlertFired = false;
 }

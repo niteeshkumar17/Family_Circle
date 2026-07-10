@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:json_annotation/json_annotation.dart';
 import 'location_model.dart';
+import '../../config/app_config.dart';
 
 part 'geofence_model.g.dart';
 
@@ -87,12 +88,35 @@ class GeofenceModel {
     );
   }
 
-  /// Check if a location is inside this geofence
-  bool containsLocation(LocationModel location) {
+  /// Calculate distance from geofence center to a location (meters)
+  double distanceToCenter(LocationModel location) {
     return _calculateDistance(
       latitude, longitude,
       location.latitude, location.longitude,
-    ) <= radiusMeters;
+    );
+  }
+
+  /// Check if a location is inside this geofence
+  bool containsLocation(LocationModel location) {
+    return distanceToCenter(location) <= radiusMeters;
+  }
+
+  /// Check if a location is "deep inside" (past the hysteresis cushion)
+  /// Used for entry detection — only triggers when clearly inside, not on boundary.
+  bool isDeepInside(LocationModel location) {
+    final hysteresis = settings.dwellTimeSeconds > 0
+        ? AppConfig.geofenceHysteresisMeters
+        : 0.0;
+    return distanceToCenter(location) <= (radiusMeters - hysteresis);
+  }
+
+  /// Check if a location is "clearly outside" (past the hysteresis cushion)
+  /// Used for exit detection — only triggers when clearly outside, not on boundary.
+  bool isClearlyOutside(LocationModel location) {
+    final hysteresis = settings.dwellTimeSeconds > 0
+        ? AppConfig.geofenceHysteresisMeters
+        : 0.0;
+    return distanceToCenter(location) > (radiusMeters + hysteresis);
   }
 
   /// Check if coordinates are inside this geofence
@@ -170,6 +194,8 @@ enum GeofenceType { home, school, office, custom }
 class GeofenceSettings {
   final bool notifyOnEntry;
   final bool notifyOnExit;
+  final bool notifyOnDwell;
+  final int dwellTimeSeconds; // 0 = use global default from AppConfig
   final List<String> notifyMembers; // admin IDs to notify, empty = all admins
   final bool enableQuietHours;
   @JsonKey(fromJson: _timeOfDayFromJson, toJson: _timeOfDayToJson)
@@ -180,11 +206,17 @@ class GeofenceSettings {
   GeofenceSettings({
     this.notifyOnEntry = true,
     this.notifyOnExit = true,
+    this.notifyOnDwell = true,
+    this.dwellTimeSeconds = 0,
     this.notifyMembers = const [],
     this.enableQuietHours = false,
     this.quietStart,
     this.quietEnd,
   });
+
+  /// Effective dwell time: per-geofence override or global default
+  int get effectiveDwellTimeSeconds =>
+      dwellTimeSeconds > 0 ? dwellTimeSeconds : AppConfig.geofenceDwellTimeSeconds;
 
   factory GeofenceSettings.fromJson(Map<String, dynamic> json) =>
       _$GeofenceSettingsFromJson(json);
@@ -194,6 +226,8 @@ class GeofenceSettings {
   GeofenceSettings copyWith({
     bool? notifyOnEntry,
     bool? notifyOnExit,
+    bool? notifyOnDwell,
+    int? dwellTimeSeconds,
     List<String>? notifyMembers,
     bool? enableQuietHours,
     TimeOfDay? quietStart,
@@ -202,6 +236,8 @@ class GeofenceSettings {
     return GeofenceSettings(
       notifyOnEntry: notifyOnEntry ?? this.notifyOnEntry,
       notifyOnExit: notifyOnExit ?? this.notifyOnExit,
+      notifyOnDwell: notifyOnDwell ?? this.notifyOnDwell,
+      dwellTimeSeconds: dwellTimeSeconds ?? this.dwellTimeSeconds,
       notifyMembers: notifyMembers ?? this.notifyMembers,
       enableQuietHours: enableQuietHours ?? this.enableQuietHours,
       quietStart: quietStart ?? this.quietStart,
