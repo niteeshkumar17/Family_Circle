@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import '../../../config/routes.dart';
 import '../../../services/notification_service.dart';
 import '../../../services/background_service.dart';
@@ -70,7 +71,13 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
             if (granted) {
               // Initialize background location service
               try {
-                await BackgroundLocationService().start();
+                final bgService = BackgroundLocationService();
+                await bgService.start();
+                // Configure with current user
+                final user = FirebaseAuth.instance.currentUser;
+                if (user != null) {
+                  await bgService.setUserId(user.uid);
+                }
               } catch (e) {
                 debugPrint('BackgroundLocationService init error: $e');
               }

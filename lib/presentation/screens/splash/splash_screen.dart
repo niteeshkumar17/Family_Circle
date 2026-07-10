@@ -54,7 +54,10 @@ class _SplashScreenState extends State<SplashScreen> {
         // Initialize services if permissions are already granted
         try {
           await NotificationService().initialize();
-          await BackgroundLocationService().start();
+          final bgService = BackgroundLocationService();
+          await bgService.start();
+          // Configure background service with user's identity
+          await bgService.setUserId(user.uid);
         } catch (e) {
           debugPrint('Error starting services: $e');
         }
@@ -69,6 +72,17 @@ class _SplashScreenState extends State<SplashScreen> {
         final phone = userDoc.data()?['phone']?.toString() ?? '';
         final hasCompletedSetup = userDoc.exists && phone.isNotEmpty;
         
+        // Feed familyId to background service
+        final familyIds = List<String>.from(userDoc.data()?['familyIds'] ?? []);
+        if (familyIds.isNotEmpty) {
+          final activeFamilyId = userDoc.data()?['currentFamilyId'] ?? familyIds.first;
+          try {
+            await BackgroundLocationService().setFamilyId(activeFamilyId);
+          } catch (e) {
+            debugPrint('Error setting family ID for bg service: $e');
+          }
+        }
+
         if (!hasCompletedSetup) {
           // User hasn't completed profile setup
           if (!mounted) return;
@@ -77,7 +91,6 @@ class _SplashScreenState extends State<SplashScreen> {
         }
         
         // Check if user has joined a family
-        final familyIds = List<String>.from(userDoc.data()?['familyIds'] ?? []);
         if (familyIds.isEmpty) {
           // User hasn't joined/created a family yet
           if (!mounted) return;

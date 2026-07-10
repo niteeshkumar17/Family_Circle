@@ -34,13 +34,13 @@ class BackgroundLocationService {
     await _service.configure(
       androidConfiguration: AndroidConfiguration(
         onStart: onStart,
-        autoStart: false, // Don't auto-start, wait for user consent
+        autoStart: true, // Auto-start when app launches
         isForegroundMode: true, // Required for Android 10+
         notificationChannelId: 'family_nest_location',
         initialNotificationTitle: 'FamilyNest',
         initialNotificationContent: 'Location sharing is active',
         foregroundServiceNotificationId: 888,
-        autoStartOnBoot: false,
+        autoStartOnBoot: true, // Restart after device reboot
       ),
       iosConfiguration: IosConfiguration(
         autoStart: false,
@@ -70,14 +70,37 @@ class BackgroundLocationService {
     return await _service.isRunning();
   }
 
-  /// Update user ID for location tracking
-  void setUserId(String userId) {
+  /// Update user ID for location tracking (persists + notifies service)
+  Future<void> setUserId(String userId) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('userId', userId);
     _service.invoke('setUserId', {'userId': userId});
   }
 
-  /// Set family ID for location tracking
-  void setFamilyId(String familyId) {
+  /// Set family ID for location tracking (persists + notifies service)
+  Future<void> setFamilyId(String familyId) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('familyId', familyId);
     _service.invoke('setFamilyId', {'familyId': familyId});
+  }
+
+  /// Configure background service with user and family IDs.
+  /// Call this after login and whenever the active family changes.
+  Future<void> configureForUser({
+    required String userId,
+    required String familyId,
+  }) async {
+    await setUserId(userId);
+    await setFamilyId(familyId);
+  }
+
+  /// Clear user data (call on sign-out)
+  Future<void> clearUser() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('userId');
+    await prefs.remove('familyId');
+    _service.invoke('setUserId', {'userId': ''});
+    _service.invoke('setFamilyId', {'familyId': ''});
   }
 
   /// Enable/disable location sharing
@@ -122,7 +145,7 @@ Future<void> onStart(ServiceInstance service) async {
   bool sosMode = false;
   LocationData? lastPosition;
   DateTime? lastUpdateTime;
-  String? _presenceRegisteredUserId;
+  String? presenceRegisteredUserId;
 
   // Services
   final battery = Battery();
@@ -132,8 +155,8 @@ Future<void> onStart(ServiceInstance service) async {
   final location = Location();
 
   Future<void> configurePresenceOnDisconnect(String uid) async {
-    if (_presenceRegisteredUserId != null && _presenceRegisteredUserId != uid) {
-      await database.ref('presence/$_presenceRegisteredUserId').onDisconnect().cancel();
+    if (presenceRegisteredUserId != null && presenceRegisteredUserId != uid) {
+      await database.ref('presence/$presenceRegisteredUserId').onDisconnect().cancel();
     }
 
     final presenceRef = database.ref('presence/$uid');
@@ -142,7 +165,7 @@ Future<void> onStart(ServiceInstance service) async {
       'lastSeen': ServerValue.timestamp,
       'appState': 'offline',
     });
-    _presenceRegisteredUserId = uid;
+    presenceRegisteredUserId = uid;
   }
 
   // Load saved state
@@ -150,8 +173,8 @@ Future<void> onStart(ServiceInstance service) async {
   familyId = prefs.getString('familyId');
   locationSharingEnabled = prefs.getBool('locationSharingEnabled') ?? true;
 
-  if (userId != null && userId!.isNotEmpty) {
-    await configurePresenceOnDisconnect(userId!);
+  if (userId != null && userId.isNotEmpty) {
+    await configurePresenceOnDisconnect(userId);
   }
 
   try {
@@ -184,7 +207,7 @@ Future<void> onStart(ServiceInstance service) async {
         'appState': 'stopped',
       });
       await database.ref('presence/$userId').onDisconnect().cancel();
-      _presenceRegisteredUserId = null;
+      presenceRegisteredUserId = null;
     }
     service.stopSelf();
   });
@@ -192,7 +215,7 @@ Future<void> onStart(ServiceInstance service) async {
   service.on('setUserId').listen((event) async {
     userId = event?['userId'];
     if (userId == null || userId!.isEmpty) {
-      final previousUserId = _presenceRegisteredUserId;
+      final previousUserId = presenceRegisteredUserId;
       if (previousUserId != null) {
         await database.ref('presence/$previousUserId').set({
           'online': false,
@@ -200,7 +223,7 @@ Future<void> onStart(ServiceInstance service) async {
           'appState': 'signed_out',
         });
         await database.ref('presence/$previousUserId').onDisconnect().cancel();
-        _presenceRegisteredUserId = null;
+        presenceRegisteredUserId = null;
       }
       await prefs.remove('userId');
     } else {

@@ -44,7 +44,7 @@ class NotificationModel {
 
   NotificationModel copyWith({
     String? id,
-    String? oderId,
+    String? userId,
     NotificationType? type,
     String? title,
     String? body,
@@ -56,7 +56,7 @@ class NotificationModel {
   }) {
     return NotificationModel(
       id: id ?? this.id,
-      userId: oderId ?? userId,
+      userId: userId ?? this.userId,
       type: type ?? this.type,
       title: title ?? this.title,
       body: body ?? this.body,

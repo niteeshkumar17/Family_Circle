@@ -392,11 +392,12 @@ class _ManageNestScreenState extends State<ManageNestScreen> {
           ElevatedButton(
             onPressed: () async {
               if (controller.text.trim().isNotEmpty) {
+                final messenger = ScaffoldMessenger.of(context);
                 Navigator.pop(context);
                 try {
                   await _familyService.updateFamilyName(controller.text.trim());
                   if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    messenger.showSnackBar(
                       const SnackBar(
                         content: Text('Name updated!'),
                         backgroundColor: AppTheme.successColor,
@@ -406,7 +407,7 @@ class _ManageNestScreenState extends State<ManageNestScreen> {
                   }
                 } catch (e) {
                   if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    messenger.showSnackBar(
                       SnackBar(
                         content: Text('Failed to update name: $e'),
                         backgroundColor: AppTheme.errorColor,
@@ -442,25 +443,26 @@ class _ManageNestScreenState extends State<ManageNestScreen> {
           ),
           ElevatedButton(
             onPressed: () async {
-              Navigator.pop(context);
+              final messenger = ScaffoldMessenger.of(context);
+              final navigator = Navigator.of(context);
+              navigator.pop();
               try {
                 await _familyService.leaveFamily();
                 if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  messenger.showSnackBar(
                     const SnackBar(
                       content: Text('You have left the family'),
                       backgroundColor: AppTheme.successColor,
                     ),
                   );
-                  Navigator.pushNamedAndRemoveUntil(
-                    context,
+                  navigator.pushNamedAndRemoveUntil(
                     AppRoutes.createJoinFamily,
                     (route) => false,
                   );
                 }
               } catch (e) {
                 if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  messenger.showSnackBar(
                     SnackBar(
                       content: Text('Failed to leave: $e'),
                       backgroundColor: AppTheme.errorColor,
@@ -495,25 +497,26 @@ class _ManageNestScreenState extends State<ManageNestScreen> {
           ),
           ElevatedButton(
             onPressed: () async {
-              Navigator.pop(context);
+              final messenger = ScaffoldMessenger.of(context);
+              final navigator = Navigator.of(context);
+              navigator.pop();
               try {
                 await _familyService.deleteFamily();
                 if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  messenger.showSnackBar(
                     const SnackBar(
                       content: Text('Family deleted'),
                       backgroundColor: AppTheme.successColor,
                     ),
                   );
-                  Navigator.pushNamedAndRemoveUntil(
-                    context,
+                  navigator.pushNamedAndRemoveUntil(
                     AppRoutes.createJoinFamily,
                     (route) => false,
                   );
                 }
               } catch (e) {
                 if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  messenger.showSnackBar(
                     SnackBar(
                       content: Text('Failed to delete: $e'),
                       backgroundColor: AppTheme.errorColor,

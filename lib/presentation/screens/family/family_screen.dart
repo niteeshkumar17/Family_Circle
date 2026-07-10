@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import '../../../config/theme_config.dart';
 import '../../../services/family_service.dart';
 import '../../../services/location_service.dart';
+import '../../../services/background_service.dart';
 import '../history/member_history_screen.dart';
 import '../placeholder_screens.dart';
 
@@ -52,6 +53,16 @@ class _RealFamilyScreenState extends State<RealFamilyScreen> {
           userId: user.uid,
           familyId: _familyService.currentFamilyId!,
         );
+        
+        // Also configure background service with IDs so it tracks in background
+        try {
+          await BackgroundLocationService().configureForUser(
+            userId: user.uid,
+            familyId: _familyService.currentFamilyId!,
+          );
+        } catch (e) {
+          debugPrint('Error configuring background service: $e');
+        }
         
         // Check permissions and start tracking
         final hasPermission = await _locationService.checkPermissions();
@@ -161,6 +172,7 @@ class _RealFamilyScreenState extends State<RealFamilyScreen> {
             onPressed: () async {
               if (controller.text.trim().isEmpty) return;
               
+              final messenger = ScaffoldMessenger.of(context);
               Navigator.pop(context);
               setState(() => _isLoading = true);
               
@@ -175,14 +187,14 @@ class _RealFamilyScreenState extends State<RealFamilyScreen> {
                     _isLoading = false;
                   });
                   
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  messenger.showSnackBar(
                     const SnackBar(content: Text('Family created successfully!')),
                   );
                 }
               } catch (e) {
                 if (mounted) {
                   setState(() => _isLoading = false);
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  messenger.showSnackBar(
                     SnackBar(content: Text('Error: $e')),
                   );
                 }
@@ -234,6 +246,7 @@ class _RealFamilyScreenState extends State<RealFamilyScreen> {
             onPressed: () async {
               if (controller.text.trim().isEmpty) return;
               
+              final messenger = ScaffoldMessenger.of(context);
               Navigator.pop(context);
               setState(() => _isLoading = true);
               
@@ -250,14 +263,14 @@ class _RealFamilyScreenState extends State<RealFamilyScreen> {
                       _isLoading = false;
                     });
                     
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    messenger.showSnackBar(
                       const SnackBar(content: Text('Joined family successfully!')),
                     );
                   }
                 } else {
                   if (mounted) {
                     setState(() => _isLoading = false);
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    messenger.showSnackBar(
                       const SnackBar(content: Text('Invalid invite code')),
                     );
                   }
@@ -265,7 +278,7 @@ class _RealFamilyScreenState extends State<RealFamilyScreen> {
               } catch (e) {
                 if (mounted) {
                   setState(() => _isLoading = false);
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  messenger.showSnackBar(
                     SnackBar(content: Text('Error: $e')),
                   );
                 }

@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import '../../../config/routes.dart';
 import '../../../services/family_service.dart';
+import '../../../services/background_service.dart';
 
 class CreateFamilyScreen extends StatefulWidget {
   const CreateFamilyScreen({super.key});
@@ -20,6 +22,17 @@ class _CreateFamilyScreenState extends State<CreateFamilyScreen> {
     try {
       // Actually create the family in Firebase
       await _familyService.createFamily(_nameController.text.trim());
+      
+      // Configure background service with new family
+      final user = FirebaseAuth.instance.currentUser;
+      final familyId = _familyService.currentFamilyId;
+      if (user != null && familyId != null) {
+        await BackgroundLocationService().configureForUser(
+          userId: user.uid,
+          familyId: familyId,
+        );
+      }
+      
       if (!mounted) return;
       Navigator.pushReplacementNamed(context, AppRoutes.home);
     } catch (e) {

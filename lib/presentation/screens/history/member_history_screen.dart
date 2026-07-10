@@ -56,7 +56,6 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
     _polylines.clear();
     _events.clear();
 
-    final dateStr = DateFormat('yyyy-MM-dd').format(date);
     final random = math.Random(date.day); // Seed with day for consistent "random" data per day
 
     // Base location (Home)
@@ -412,7 +411,6 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
   }
   
   String _calcTotalDist() {
-    double dist = 0;
     if (_polylines.isEmpty) return '0.0';
     
     // Simple mock calculation for display

@@ -25,6 +25,9 @@ class LoginScreen extends StatelessWidget {
     final prefs = await SharedPreferences.getInstance();
     final permissionsCompleted = prefs.getBool('permissions_completed') ?? false;
     
+    // Persist userId for background service
+    await prefs.setString('userId', state.user.uid);
+    
     if (!context.mounted) return;
     
     if (!permissionsCompleted) {
