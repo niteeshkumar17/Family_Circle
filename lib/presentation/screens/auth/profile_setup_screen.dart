@@ -62,6 +62,7 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
         await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
           'id': user.uid,
           'name': _nameController.text.trim(),
+          'displayName': _nameController.text.trim(),
           'phoneNumber': '$_selectedCountryCode${_phoneController.text.trim()}',
           'phone': '$_selectedCountryCode${_phoneController.text.trim()}',
           'email': user.email,
@@ -74,6 +75,7 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
         // Update display name in Firebase Auth (wrapped in try-catch to handle Pigeon bug)
         try {
           await user.updateDisplayName(_nameController.text.trim());
+          await user.reload();
         } catch (e) {
           // Ignore Pigeon-related errors - the name is already saved in Firestore
           debugPrint('updateDisplayName error (ignored): $e');

@@ -56,8 +56,10 @@ class FamilyService {
 
   /// Create a new user document
   Future<void> _createUserDocument(User user) async {
+    final name = user.displayName ?? 'User';
     await _firestore.collection('users').doc(user.uid).set({
-      'displayName': user.displayName ?? 'User',
+      'displayName': name,
+      'name': name,
       'email': user.email,
       'photoUrl': user.photoURL,
       'createdAt': FieldValue.serverTimestamp(),
@@ -80,11 +82,28 @@ class FamilyService {
       throw Exception('Unable to create family right now. Please try again.');
     }
 
+    // Fetch user profile from Firestore to get their real name (from 'name' or 'displayName')
+    String resolvedName = 'User';
+    String? resolvedPhotoUrl;
+    try {
+      final userDoc = await _firestore.collection('users').doc(user.uid).get();
+      if (userDoc.exists) {
+        resolvedName = userDoc.data()?['displayName'] ?? userDoc.data()?['name'] ?? user.displayName ?? 'User';
+        resolvedPhotoUrl = userDoc.data()?['photoUrl'] ?? user.photoURL;
+      } else {
+        resolvedName = user.displayName ?? 'User';
+        resolvedPhotoUrl = user.photoURL;
+      }
+    } catch (e) {
+      resolvedName = user.displayName ?? 'User';
+      resolvedPhotoUrl = user.photoURL;
+    }
+
     // Create family document
     final familyRef = await _firestore.collection('families').add({
       'name': familyName,
       'createdBy': user.uid,
-      'createdByName': user.displayName ?? 'User',
+      'createdByName': resolvedName,
       'createdAt': FieldValue.serverTimestamp(),
       'inviteCode': inviteCode,
       'inviteCodeExpiresAt': Timestamp.fromDate(now.add(const Duration(hours: 24))),
@@ -94,8 +113,8 @@ class FamilyService {
     // Add current user as admin member
     await familyRef.collection('members').doc(user.uid).set({
       'userId': user.uid,
-      'displayName': user.displayName ?? 'You',
-      'photoUrl': user.photoURL,
+      'displayName': resolvedName,
+      'photoUrl': resolvedPhotoUrl,
       'role': 'admin',
       'joinedAt': FieldValue.serverTimestamp(),
       'locationSharingEnabled': true,
@@ -139,6 +158,23 @@ class FamilyService {
       throw Exception('Invite code has expired. Ask the family admin to generate a new code.');
     }
 
+    // Fetch user profile from Firestore to get their real name (from 'name' or 'displayName')
+    String resolvedName = 'User';
+    String? resolvedPhotoUrl;
+    try {
+      final userDoc = await _firestore.collection('users').doc(user.uid).get();
+      if (userDoc.exists) {
+        resolvedName = userDoc.data()?['displayName'] ?? userDoc.data()?['name'] ?? user.displayName ?? 'User';
+        resolvedPhotoUrl = userDoc.data()?['photoUrl'] ?? user.photoURL;
+      } else {
+        resolvedName = user.displayName ?? 'User';
+        resolvedPhotoUrl = user.photoURL;
+      }
+    } catch (e) {
+      resolvedName = user.displayName ?? 'User';
+      resolvedPhotoUrl = user.photoURL;
+    }
+
     // Avoid downgrading roles or resetting metadata if the user already joined.
     final existingMember =
         await familyDoc.reference.collection('members').doc(user.uid).get();
@@ -147,8 +183,8 @@ class FamilyService {
       // Add user to family
       await familyDoc.reference.collection('members').doc(user.uid).set({
         'userId': user.uid,
-        'displayName': user.displayName ?? 'User',
-        'photoUrl': user.photoURL,
+        'displayName': resolvedName,
+        'photoUrl': resolvedPhotoUrl,
         'role': 'member',
         'joinedAt': FieldValue.serverTimestamp(),
         'locationSharingEnabled': true,
@@ -217,6 +253,24 @@ class FamilyService {
           for (final doc in snapshot.docs) {
             final data = doc.data();
             final memberId = doc.id;
+            final isCurrent = memberId == currentUserId;
+            
+            String memberName = data['displayName'] ?? 'Unknown';
+            
+            // Self-healing: if this is the current user, ensure family member name matches profile name
+            if (isCurrent) {
+              try {
+                final userDoc = await _firestore.collection('users').doc(memberId).get();
+                if (userDoc.exists) {
+                  final profileName = userDoc.data()?['displayName'] ?? userDoc.data()?['name'];
+                  if (profileName != null && profileName != memberName) {
+                    memberName = profileName;
+                    // Update in Firestore members subcollection asynchronously
+                    doc.reference.update({'displayName': profileName}).catchError((_) {});
+                  }
+                }
+              } catch (_) {}
+            }
             
             // Get real-time location from Realtime Database
             LocationModel? location;
@@ -235,13 +289,13 @@ class FamilyService {
 
             members.add(FamilyMemberData(
               id: memberId,
-              displayName: data['displayName'] ?? 'Unknown',
+              displayName: memberName,
               photoUrl: data['photoUrl'],
               role: data['role'] ?? 'member',
               isOnline: _isRecentlyActive(location?.timestamp),
               location: location,
               battery: location?.battery ?? 100,
-              isCurrentUser: memberId == currentUserId,
+              isCurrentUser: isCurrent,
             ));
           }
 

@@ -78,8 +78,8 @@ service cloud.firestore {
       
       // Members subcollection
       match /members/{memberId} {
-        // Any family member can read the member list
-        allow read: if isAuthenticated() && isFamilyMember(familyId);
+        // Any family member can read the member list, or user can read their own membership status
+        allow read: if isAuthenticated() && (isFamilyMember(familyId) || memberId == request.auth.uid);
         
         // Users can add themselves as members (when joining)
         allow create: if isAuthenticated() && memberId == request.auth.uid;
