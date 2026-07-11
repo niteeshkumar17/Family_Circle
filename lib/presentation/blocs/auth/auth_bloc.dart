@@ -129,26 +129,32 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
     AuthLogoutRequested event,
     Emitter<AuthState> emit,
   ) async {
+    // 1. Disconnect Google Sign-In completely so user can select account next time
     try {
-      // Disconnect Google Sign-In completely so user can select account next time
       await _googleSignIn.disconnect();
-      await _googleSignIn.signOut();
-      await _auth.signOut();
-      
-      // Stop background service and clear cached identity
-      try {
-        final bgService = BackgroundLocationService();
-        await bgService.stop();
-        await bgService.clearUser();
-      } catch (_) {}
-      
-      // Clear all SharedPreferences to reset onboarding and permissions state
-      try {
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.clear();
-      } catch (_) {}
-      
     } catch (_) {}
+
+    try {
+      await _googleSignIn.signOut();
+    } catch (_) {}
+
+    try {
+      await _auth.signOut();
+    } catch (_) {}
+    
+    // 2. Stop background service and clear cached identity
+    try {
+      final bgService = BackgroundLocationService();
+      await bgService.stop();
+      await bgService.clearUser();
+    } catch (_) {}
+    
+    // 3. Clear all SharedPreferences to reset onboarding and permissions state
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.clear();
+    } catch (_) {}
+      
     emit(AuthUnauthenticated());
   }
 }
