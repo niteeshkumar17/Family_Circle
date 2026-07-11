@@ -891,13 +891,13 @@ packages:
     source: hosted
     version: "6.1.5"
   google_sign_in_android:
-    dependency: transitive
+    dependency: "direct overridden"
     description:
       name: google_sign_in_android
-      sha256: "6031f59074a337fdd81be821aba84cee3a41338c6e958499a5cd34d3e1db80ef"
+      sha256: "8d60a787b29cb7d2bcf29230865f4a91f17323c6ac5b6b9027a6418e48d9ffc3"
       url: "https://pub.dev"
     source: hosted
-    version: "6.1.20"
+    version: "6.1.18"
   google_sign_in_ios:
     dependency: transitive
     description:

@@ -68,7 +68,7 @@ dependencies:
   json_annotation: ^4.8.1
 
   # Google Sign-In
-  google_sign_in: ^7.2.0  # Upgraded to latest to fix PigeonUserDetails bug
+  google_sign_in: ^6.1.5
 
   # Battery Info
   battery_plus: ^6.0.0
@@ -97,7 +97,8 @@ flutter_icons:
     background_color: "#FFFFFF"
     theme_color: "#6366F1"
 
-# Remove overrides
+dependency_overrides:
+  google_sign_in_android: 6.1.18
 
 flutter:
   uses-material-design: true
