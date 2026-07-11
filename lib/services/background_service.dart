@@ -399,9 +399,9 @@ Future<void> onStart(ServiceInstance service) async {
       }
     }
 
-    // 2. Keep-alive location update (forces location scan & push if no updates for 4 minutes)
+    // 2. Keep-alive location update (forces location scan & push if no updates for 1 minute)
     if (locationSharingEnabled && familyId != null) {
-      if (lastUpdateTime == null || now.difference(lastUpdateTime!).inMinutes >= 4) {
+      if (lastUpdateTime == null || now.difference(lastUpdateTime!).inMinutes >= 1) {
         try {
           final position = await location.getLocation().timeout(const Duration(seconds: 10));
           
