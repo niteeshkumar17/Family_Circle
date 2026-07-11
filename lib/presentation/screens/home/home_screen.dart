@@ -7,6 +7,7 @@ import 'package:location/location.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:permission_handler/permission_handler.dart' as handler;
 import '../../../config/theme_config.dart';
 import '../../../config/routes.dart';
 import '../../../services/family_service.dart';
@@ -20,17 +21,106 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   int _currentIndex = 0;
+  bool _isBackgroundLocationRestricted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _checkPermissions();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _checkPermissions();
+    }
+  }
+
+  Future<void> _checkPermissions() async {
+    final status = await handler.Permission.locationAlways.status;
+    if (mounted) {
+      setState(() {
+        _isBackgroundLocationRestricted = status != handler.PermissionStatus.granted;
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       drawer: _buildDrawer(),
-      body: _buildBody(),
+      body: Column(
+        children: [
+          if (_isBackgroundLocationRestricted && (_currentIndex == 0 || _currentIndex == 1))
+            _buildPermissionWarningBanner(),
+          Expanded(child: _buildBody()),
+        ],
+      ),
       bottomNavigationBar: _buildBottomNav(),
       floatingActionButton: _buildSOSButton(),
       floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
+    );
+  }
+
+  Widget _buildPermissionWarningBanner() {
+    return Container(
+      color: const Color(0xFFC0392B), // Premium crimson warning color
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      child: SafeArea(
+        bottom: false,
+        child: Row(
+          children: [
+            const Icon(Icons.error_outline_rounded, color: Colors.white, size: 22),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Background Location Restricted',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  SizedBox(height: 1),
+                  Text(
+                    'Set Location to "Allow all the time" so tracking works when the app is closed.',
+                    style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            ElevatedButton(
+              onPressed: () => handler.openAppSettings(),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.white,
+                foregroundColor: const Color(0xFFC0392B),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                textStyle: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+              child: const Text('Fix Setting'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 

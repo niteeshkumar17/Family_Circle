@@ -179,17 +179,16 @@ Future<void> onStart(ServiceInstance service) async {
   }
 
   // Configure location settings in the isolate
-  await location.changeSettings(
-    accuracy: LocationAccuracy.high,
-    distanceFilter: 10,
-    interval: 15000,
-  );
-
   try {
+    await location.changeSettings(
+      accuracy: LocationAccuracy.high,
+      distanceFilter: 10,
+      interval: 15000,
+    );
     await location.enableBackgroundMode(enable: true);
   } catch (e) {
     if (kDebugMode) {
-      print('Could not enable background mode: $e');
+      print('Could not configure location in isolate: $e');
     }
   }
 
