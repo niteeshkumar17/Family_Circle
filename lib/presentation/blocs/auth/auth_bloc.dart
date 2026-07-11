@@ -2,7 +2,8 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:equatable/equatable.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
-
+import 'package:shared_preferences/shared_preferences.dart';
+import '../../../services/background_service.dart';
 // Events
 abstract class AuthEvent extends Equatable {
   @override
@@ -129,8 +130,24 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
     Emitter<AuthState> emit,
   ) async {
     try {
+      // Disconnect Google Sign-In completely so user can select account next time
+      await _googleSignIn.disconnect();
       await _googleSignIn.signOut();
       await _auth.signOut();
+      
+      // Stop background service and clear cached identity
+      try {
+        final bgService = BackgroundLocationService();
+        await bgService.stop();
+        await bgService.clearUser();
+      } catch (_) {}
+      
+      // Clear all SharedPreferences to reset onboarding and permissions state
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.clear();
+      } catch (_) {}
+      
     } catch (_) {}
     emit(AuthUnauthenticated());
   }
