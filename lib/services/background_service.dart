@@ -149,10 +149,16 @@ Future<void> onStart(ServiceInstance service) async {
     // Removed initialization notification update
 
     // Initialize Firebase in background isolate
-    if (Firebase.apps.isEmpty) {
-      await Firebase.initializeApp(
-        options: DefaultFirebaseOptions.currentPlatform,
-      );
+    try {
+      if (Firebase.apps.isEmpty) {
+        await Firebase.initializeApp(
+          options: DefaultFirebaseOptions.currentPlatform,
+        );
+      }
+    } catch (e) {
+      if (!e.toString().contains('duplicate-app') && !e.toString().contains('already exists')) {
+        debugPrint('BG Service Firebase Init Error: $e');
+      }
     }
 
     // Removed Firebase initialization notification update

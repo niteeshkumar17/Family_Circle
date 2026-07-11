@@ -32,11 +32,14 @@ void main() async {
       );
     }
   } catch (e, st) {
-    debugPrint('Firebase initialization failed: $e');
-    debugPrintStack(stackTrace: st);
-
-    runApp(FirebaseInitializationErrorApp(error: e.toString()));
-    return;
+    if (e.toString().contains('duplicate-app') || e.toString().contains('already exists')) {
+      debugPrint('Firebase already initialized natively, ignoring duplicate error.');
+    } else {
+      debugPrint('Firebase initialization failed: $e');
+      debugPrintStack(stackTrace: st);
+      runApp(FirebaseInitializationErrorApp(error: e.toString()));
+      return;
+    }
   }
 
   // NOTE: NotificationService and BackgroundLocationService are now initialized
