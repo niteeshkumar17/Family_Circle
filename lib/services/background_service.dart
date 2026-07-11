@@ -35,13 +35,13 @@ class BackgroundLocationService {
     await _service.configure(
       androidConfiguration: AndroidConfiguration(
         onStart: onStart,
-        autoStart: true, // Auto-start when app launches
+        autoStart: false, // Start manually in Dart after permission check
         isForegroundMode: true, // Required for Android 10+
         notificationChannelId: 'family_nest_location',
         initialNotificationTitle: 'Flockar',
         initialNotificationContent: 'Location sharing is active',
         foregroundServiceNotificationId: 889, // Changed from 888 to 889
-        autoStartOnBoot: true, // Restart after device reboot
+        autoStartOnBoot: false, // Prevent native crash if permissions revoked
       ),
       iosConfiguration: IosConfiguration(
         autoStart: false,
