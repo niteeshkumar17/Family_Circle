@@ -107,7 +107,7 @@ class _RealFamilyScreenState extends State<RealFamilyScreen> {
         backgroundColor: const Color(0xFF1E1E1E),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: const Text(
-          'Welcome to FamilyNest',
+          'Welcome to Flockar',
           style: TextStyle(color: Colors.white),
         ),
         content: const Text(
@@ -353,7 +353,7 @@ class _RealFamilyScreenState extends State<RealFamilyScreen> {
           ElevatedButton.icon(
             onPressed: () {
               if (inviteCode != null) {
-                Share.share('Join my FamilyNest circle with code: $inviteCode\n\nDownload FamilyNest app to stay connected with family.');
+                Share.share('Join my Flockar circle with code: $inviteCode\n\nDownload Flockar app to stay connected with family.');
               }
               Navigator.pop(context);
             },
@@ -542,6 +542,7 @@ class _RealFamilyScreenState extends State<RealFamilyScreen> {
                 lng: member.location?.longitude ?? 0,
                 speed: member.location?.speed ?? 0,
                 isMoving: member.isMoving,
+                phone: member.phone,
               ),
             ),
           );

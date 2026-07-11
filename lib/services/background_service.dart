@@ -7,6 +7,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:battery_plus/battery_plus.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:geocoding/geocoding.dart' hide Location;
 import 'package:permission_handler/permission_handler.dart' as permission_handler;
 import '../config/app_config.dart';
 import '../firebase_options.dart';
@@ -37,9 +38,9 @@ class BackgroundLocationService {
         autoStart: true, // Auto-start when app launches
         isForegroundMode: true, // Required for Android 10+
         notificationChannelId: 'family_nest_location',
-        initialNotificationTitle: 'FamilyNest',
+        initialNotificationTitle: 'Flockar',
         initialNotificationContent: 'Location sharing is active',
-        foregroundServiceNotificationId: 888,
+        foregroundServiceNotificationId: 889, // Changed from 888 to 889
         autoStartOnBoot: true, // Restart after device reboot
       ),
       iosConfiguration: IosConfiguration(
@@ -103,9 +104,9 @@ class BackgroundLocationService {
     _service.invoke('setFamilyId', {'familyId': ''});
   }
 
-  /// Enable/disable location sharing
-  void setLocationSharingEnabled(bool enabled) {
-    _service.invoke('setLocationSharing', {'enabled': enabled});
+  /// Enable/disable location sharing for a specific family
+  void setLocationSharingEnabled(String familyId, bool enabled) {
+    _service.invoke('setLocationSharing', {'familyId': familyId, 'enabled': enabled});
   }
 
   /// Set tracking interval
@@ -145,13 +146,7 @@ Future<void> onStart(ServiceInstance service) async {
   } catch (_) {}
 
   try {
-    // Update notification immediately so we KNOW onStart is running
-    if (service is AndroidServiceInstance) {
-      service.setForegroundNotificationInfo(
-        title: 'FamilyNest',
-        content: '⏳ Initializing location service...',
-      );
-    }
+    // Removed initialization notification update
 
     // Initialize Firebase in background isolate
     if (Firebase.apps.isEmpty) {
@@ -160,12 +155,7 @@ Future<void> onStart(ServiceInstance service) async {
       );
     }
 
-    if (service is AndroidServiceInstance) {
-      service.setForegroundNotificationInfo(
-        title: 'FamilyNest',
-        content: '⏳ Firebase initialized, loading state...',
-      );
-    }
+    // Removed Firebase initialization notification update
 
     // ─── State variables ───
     String? userId;
@@ -177,6 +167,7 @@ Future<void> onStart(ServiceInstance service) async {
     double? lastLng;
     double? lastAccuracy;
     DateTime? lastUpdateTime;
+    String? lastAddress; // Cache the address for stationary device
     String? presenceRegisteredUserId;
     int timerTickCount = 0;
 
@@ -194,7 +185,11 @@ Future<void> onStart(ServiceInstance service) async {
       } catch (_) {}
       userId = prefs!.getString('userId');
       familyId = prefs.getString('familyId');
-      locationSharingEnabled = prefs.getBool('locationSharingEnabled') ?? true;
+      if (familyId != null) {
+        locationSharingEnabled = prefs.getBool('location_sharing_enabled_$familyId') ?? true;
+      } else {
+        locationSharingEnabled = true;
+      }
       // Load last known position from prefs (survives process death)
       lastLat ??= prefs.getDouble('bg_last_lat');
       lastLng ??= prefs.getDouble('bg_last_lng');
@@ -237,6 +232,27 @@ Future<void> onStart(ServiceInstance service) async {
         }
       } catch (_) {}
 
+      // Add reverse geocoding
+      String? address = lastAddress;
+      // Only geocode if we moved significantly or don't have an address yet
+      if (address == null || lastLat == null || lastLng == null || 
+          (lastLat! - lat).abs() > 0.0001 || (lastLng! - lng).abs() > 0.0001) {
+        try {
+          final placemarks = await placemarkFromCoordinates(lat, lng).timeout(const Duration(seconds: 5));
+          if (placemarks.isNotEmpty) {
+            final place = placemarks.first;
+            final parts = <String>[];
+            if (place.name != null && place.name!.isNotEmpty) parts.add(place.name!);
+            if (place.subLocality != null && place.subLocality!.isNotEmpty) parts.add(place.subLocality!);
+            if (place.locality != null && place.locality!.isNotEmpty) parts.add(place.locality!);
+            if (parts.isNotEmpty) {
+              address = parts.take(3).join(', ');
+              lastAddress = address;
+            }
+          }
+        } catch (_) {}
+      }
+
       return {
         'latitude': lat,
         'longitude': lng,
@@ -244,6 +260,7 @@ Future<void> onStart(ServiceInstance service) async {
         'altitude': altitude,
         'speed': speed,
         'heading': heading,
+        'address': address,
         'battery': batteryLevel,
         'isCharging': isCharging,
         'networkStatus': networkStatus,
@@ -257,6 +274,25 @@ Future<void> onStart(ServiceInstance service) async {
       if (userId == null || familyId == null) return false;
       try {
         await database.ref('locations/$familyId/$userId').set(data);
+        
+        // Also save to daily location history
+        try {
+          final now = DateTime.now();
+          final dateKey = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+          final timestamp = data['timestamp'] ?? now.millisecondsSinceEpoch;
+          
+          await database.ref('locationHistory/$familyId/$userId/$dateKey/$timestamp').set({
+            'latitude': data['latitude'],
+            'longitude': data['longitude'],
+            'accuracy': data['accuracy'],
+            'speed': data['speed'],
+            'address': data['address'],
+            'battery': data['battery'],
+            'isCharging': data['isCharging'],
+            'timestamp': timestamp,
+          });
+        } catch (_) {}
+        
         return true;
       } catch (_) {
         try {
@@ -297,10 +333,10 @@ Future<void> onStart(ServiceInstance service) async {
     // Show diagnostic notification
     if (service is AndroidServiceInstance) {
       service.setForegroundNotificationInfo(
-        title: 'FamilyNest',
+        title: 'Flockar',
         content: userId != null
-            ? '📍 Location service ready'
-            : '⚠️ Waiting for user login...',
+            ? 'Location sharing active'
+            : 'Waiting for user login...',
       );
     }
 
@@ -313,7 +349,9 @@ Future<void> onStart(ServiceInstance service) async {
         distanceFilter: 0,
         interval: 15000,
       );
-      await location.enableBackgroundMode(enable: true);
+      // We are ALREADY running inside a background service.
+      // Calling enableBackgroundMode creates a SECOND generic notification ("Location background service running").
+      // We do NOT need this.
     } catch (_) {}
 
     // ─── Location stream listener ───
@@ -417,14 +455,22 @@ Future<void> onStart(ServiceInstance service) async {
       familyId = event?['familyId'];
       if (familyId == null || familyId!.isEmpty) {
         try { await prefs!.remove('familyId'); } catch (_) {}
+        locationSharingEnabled = true;
       } else {
         try { await prefs!.setString('familyId', familyId!); } catch (_) {}
+        locationSharingEnabled = prefs!.getBool('location_sharing_enabled_$familyId') ?? true;
       }
     });
 
     service.on('setLocationSharing').listen((event) async {
-      locationSharingEnabled = event?['enabled'] ?? true;
-      try { await prefs!.setBool('locationSharingEnabled', locationSharingEnabled); } catch (_) {}
+      final targetFamilyId = event?['familyId'];
+      final enabled = event?['enabled'] ?? true;
+      if (targetFamilyId != null) {
+        try { await prefs!.setBool('location_sharing_enabled_$targetFamilyId', enabled); } catch (_) {}
+        if (familyId == targetFamilyId) {
+          locationSharingEnabled = enabled;
+        }
+      }
     });
 
     service.on('setInterval').listen((event) {
@@ -459,8 +505,8 @@ Future<void> onStart(ServiceInstance service) async {
       // Step 1: Update notification FIRST (diagnostic — proves timer fires)
       if (service is AndroidServiceInstance) {
         service.setForegroundNotificationInfo(
-          title: 'FamilyNest',
-          content: '📍 Heartbeat #$timerTickCount at ${_formatTime(DateTime.now())}',
+          title: 'Flockar',
+          content: 'Location sharing active',
         );
       }
 
@@ -471,8 +517,8 @@ Future<void> onStart(ServiceInstance service) async {
       if (userId == null || userId!.isEmpty) {
         if (service is AndroidServiceInstance) {
           service.setForegroundNotificationInfo(
-            title: 'FamilyNest',
-            content: '⚠️ No user — waiting for login',
+            title: 'Flockar',
+            content: 'Waiting for user login...',
           );
         }
         try {
@@ -494,14 +540,7 @@ Future<void> onStart(ServiceInstance service) async {
       } catch (_) {}
 
       if (!locationSharingEnabled || familyId == null) {
-        if (service is AndroidServiceInstance) {
-          service.setForegroundNotificationInfo(
-            title: 'FamilyNest',
-            content: familyId == null
-                ? '⚠️ No family — join a family to share location'
-                : '⏸️ Location sharing paused',
-          );
-        }
+          // Removed paused notification update
         return;
       }
 
@@ -552,15 +591,7 @@ Future<void> onStart(ServiceInstance service) async {
         }
         lastUpdateTime = now;
 
-        if (service is AndroidServiceInstance) {
-          final status = gpsFresh ? 'GPS' : 'cached';
-          service.setForegroundNotificationInfo(
-            title: 'FamilyNest',
-            content: ok
-                ? '📍 Updated ($status) ${_formatTime(now)}'
-                : '📍 Cached — no network',
-          );
-        }
+        // Removed location push notification update
 
         service.invoke('locationUpdate', data);
 
@@ -570,12 +601,7 @@ Future<void> onStart(ServiceInstance service) async {
         } catch (_) {}
       } else {
         // No coordinates at all (neither GPS nor cached)
-        if (service is AndroidServiceInstance) {
-          service.setForegroundNotificationInfo(
-            title: 'FamilyNest',
-            content: '⚠️ Waiting for first GPS fix...',
-          );
-        }
+        // Removed waiting for GPS notification update
         try {
           await prefs!.setString('bg_service_status', 'no_coordinates');
         } catch (_) {}
@@ -624,14 +650,7 @@ Future<void> onStart(ServiceInstance service) async {
     } catch (_) {}
 
     // Still try to show error in notification
-    try {
-      if (service is AndroidServiceInstance) {
-        service.setForegroundNotificationInfo(
-          title: 'FamilyNest',
-          content: '❌ Service error: ${e.toString().substring(0, 50)}',
-        );
-      }
-    } catch (_) {}
+    // Removed error notification update
   }
 }
 

@@ -11,6 +11,9 @@ import 'package:permission_handler/permission_handler.dart' as handler;
 import '../../../config/theme_config.dart';
 import '../../../config/routes.dart';
 import '../../../services/family_service.dart';
+import '../../../services/notification_service.dart';
+import '../../../data/models/geofence_model.dart';
+import '../../../data/models/notification_model.dart';
 import '../../blocs/auth/auth_bloc.dart';
 import '../family/family_screen.dart';
 
@@ -138,7 +141,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Family Nest (No data sold)',
+                  'Flockar (No data sold)',
                   style: TextStyle(
                     color: Colors.white,
                     fontSize: 18,
@@ -164,16 +167,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               padding: EdgeInsets.zero,
               children: [
                 _buildDrawerSectionHeader('My Nests'),
-                _buildDrawerItem(Icons.sync_rounded, 'Switch Nests', () {}),
+                _buildDrawerItem(Icons.sync_rounded, 'Switch Nests', () => _showSwitchNestsSheet(context)),
                 _buildDrawerItem(Icons.add_rounded, 'Add a nest', () => Navigator.pushNamed(context, AppRoutes.createFamily)),
                 _buildDrawerItem(Icons.add_rounded, 'Join Nest?', () => Navigator.pushNamed(context, AppRoutes.joinFamily)),
                 Divider(color: Colors.white.withOpacity(0.1), height: 1),
                 
-
-                
-                _buildDrawerItem(Icons.system_update_rounded, 'Check update', () {}),
-                _buildDrawerItem(Icons.share_outlined, 'Share App', () {}),
-                _buildDrawerItem(Icons.privacy_tip_outlined, 'Privacy Policy', () {}),
+                _buildDrawerItem(Icons.system_update_rounded, 'Check update', () {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('You are on the latest version'), backgroundColor: AppTheme.primaryColor),
+                  );
+                }),
+                _buildDrawerItem(Icons.share_outlined, 'Share App', () {
+                  Share.share('Check out Flockar, a privacy-first family locator app!');
+                }),
+                _buildDrawerItem(Icons.privacy_tip_outlined, 'Privacy Policy', () {
+                  Navigator.pushNamed(context, AppRoutes.privacy);
+                }),
               ],
             ),
           ),
@@ -316,6 +325,112 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       ),
     );
   }
+  void _showSwitchNestsSheet(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (context) => Container(
+        height: MediaQuery.of(context).size.height * 0.5,
+        decoration: const BoxDecoration(
+          color: Color(0xFF1A1A1A),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          children: [
+            // Handle bar
+            Container(
+              margin: const EdgeInsets.only(top: 12),
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.grey.shade700,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            // Header
+            Padding(
+              padding: const EdgeInsets.all(20),
+              child: Row(
+                children: [
+                  const Text(
+                    'Switch Nests',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white54),
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                ],
+              ),
+            ),
+            Divider(color: Colors.white.withOpacity(0.1), height: 1),
+            // Content
+            Expanded(
+              child: FutureBuilder<List<FamilyInfo>>(
+                future: FamilyService().getUserFamilies(),
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState == ConnectionState.waiting) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  if (snapshot.hasError || !snapshot.hasData || snapshot.data!.isEmpty) {
+                    return const Center(
+                      child: Text('No nests found.', style: TextStyle(color: Colors.white54)),
+                    );
+                  }
+
+                  final families = snapshot.data!;
+                  return ListView.builder(
+                    padding: const EdgeInsets.all(8),
+                    itemCount: families.length,
+                    itemBuilder: (context, index) {
+                      final family = families[index];
+                      return ListTile(
+                        leading: CircleAvatar(
+                          backgroundColor: AppTheme.primaryColor.withOpacity(0.2),
+                          child: const Icon(Icons.family_restroom, color: AppTheme.primaryColor),
+                        ),
+                        title: Text(
+                          family.familyName,
+                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w500),
+                        ),
+                        subtitle: Text(
+                          '${family.memberCount} members',
+                          style: const TextStyle(color: Colors.white54),
+                        ),
+                        onTap: () async {
+                          Navigator.pop(context); // Close sheet
+                          try {
+                            await FamilyService().switchFamily(family.id);
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('Switched to ${family.familyName}'), backgroundColor: AppTheme.primaryColor),
+                              );
+                            }
+                          } catch (e) {
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Failed to switch nest'), backgroundColor: Colors.red),
+                              );
+                            }
+                          }
+                        },
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 // Map View Content
@@ -419,6 +534,8 @@ class _MapViewContentState extends State<MapViewContent> {
     
     // Add markers for real family members
     for (final member in _familyMembers) {
+      if (member.id == _familyService.currentUserId) continue; // Skip current user
+      
       if (member.latitude != null && member.longitude != null) {
         _markers.add(
           Marker(
@@ -712,6 +829,7 @@ class _MapViewContentState extends State<MapViewContent> {
     );
   }
 
+
   void _showNotificationsSheet(BuildContext context) {
     showModalBottomSheet(
       context: context,
@@ -751,6 +869,7 @@ class _MapViewContentState extends State<MapViewContent> {
                   const Spacer(),
                   TextButton(
                     onPressed: () {
+                      NotificationService().markAllAsRead();
                       Navigator.pop(context);
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
@@ -767,10 +886,14 @@ class _MapViewContentState extends State<MapViewContent> {
             const Divider(height: 1),
             // Notifications list
             Expanded(
-              child: FutureBuilder<String?>(
-                future: FamilyService().getCurrentUserFamilyId(),
+              child: StreamBuilder<List<NotificationModel>>(
+                stream: NotificationService().getUserNotifications(),
                 builder: (context, snapshot) {
-                  if (!snapshot.hasData || snapshot.data == null) {
+                  if (snapshot.connectionState == ConnectionState.waiting) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  
+                  if (!snapshot.hasData || snapshot.data!.isEmpty) {
                     return Center(
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
@@ -790,24 +913,18 @@ class _MapViewContentState extends State<MapViewContent> {
                       ),
                     );
                   }
-                  return ListView(
+                  
+                  final notifications = snapshot.data!;
+                  
+                  return ListView.builder(
                     padding: const EdgeInsets.symmetric(vertical: 8),
-                    children: [
-                      _buildNotificationItem(
-                        icon: Icons.info_outline,
-                        iconColor: AppTheme.primaryColor,
-                        title: 'Welcome to FamilyNest!',
-                        subtitle: 'Your family tracking is now active',
-                        isUnread: true,
-                      ),
-                      _buildNotificationItem(
-                        icon: Icons.location_on,
-                        iconColor: AppTheme.successColor,
-                        title: 'Location tracking enabled',
-                        subtitle: 'Family members can see your location',
-                        isUnread: false,
-                      ),
-                    ],
+                    itemCount: notifications.length,
+                    itemBuilder: (context, index) {
+                      final notification = notifications[index];
+                      return _buildNotificationItem(
+                        notification: notification,
+                      );
+                    },
                   );
                 },
               ),
@@ -819,59 +936,115 @@ class _MapViewContentState extends State<MapViewContent> {
   }
 
   Widget _buildNotificationItem({
-    required IconData icon,
-    required Color iconColor,
-    required String title,
-    required String subtitle,
-    required bool isUnread,
+    required NotificationModel notification,
   }) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-      color: isUnread ? AppTheme.primaryColor.withOpacity(0.05) : Colors.transparent,
-      child: Row(
-        children: [
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: iconColor.withOpacity(0.1),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Icon(icon, color: iconColor, size: 22),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: TextStyle(
-                    fontWeight: isUnread ? FontWeight.w600 : FontWeight.w500,
-                    fontSize: 14,
-                    color: AppTheme.textPrimary,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  subtitle,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: AppTheme.textSecondary,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          if (isUnread)
+    IconData icon;
+    Color iconColor;
+
+    switch (notification.type) {
+      case NotificationType.sos:
+        icon = Icons.warning_rounded;
+        iconColor = Colors.red;
+        break;
+      case NotificationType.geofenceEntry:
+      case NotificationType.geofenceExit:
+        icon = Icons.location_on;
+        iconColor = AppTheme.successColor;
+        break;
+      case NotificationType.lowBattery:
+      case NotificationType.phoneOff:
+        icon = Icons.battery_alert;
+        iconColor = Colors.orange;
+        break;
+      case NotificationType.familyJoin:
+      case NotificationType.familyLeave:
+        icon = Icons.group;
+        iconColor = AppTheme.primaryColor;
+        break;
+      case NotificationType.locationRequest:
+        icon = Icons.share_location;
+        iconColor = AppTheme.primaryColor;
+        break;
+      case NotificationType.general:
+      default:
+        icon = Icons.info_outline;
+        iconColor = AppTheme.primaryColor;
+    }
+
+    return InkWell(
+      onTap: () {
+        if (!notification.isRead) {
+          NotificationService().markAsRead(notification.id);
+        }
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+        color: !notification.isRead ? AppTheme.primaryColor.withOpacity(0.05) : Colors.transparent,
+        child: Row(
+          children: [
             Container(
-              width: 8,
-              height: 8,
-              decoration: const BoxDecoration(
-                color: AppTheme.primaryColor,
-                shape: BoxShape.circle,
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: iconColor.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(icon, color: iconColor, size: 22),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          notification.title,
+                          style: TextStyle(
+                            fontWeight: !notification.isRead ? FontWeight.w600 : FontWeight.w500,
+                            fontSize: 14,
+                            color: AppTheme.textPrimary,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      Text(
+                        notification.timeAgo,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: !notification.isRead ? AppTheme.primaryColor : AppTheme.textSecondary,
+                          fontWeight: !notification.isRead ? FontWeight.w600 : FontWeight.normal,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    notification.body,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppTheme.textSecondary,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
               ),
             ),
-        ],
+            if (!notification.isRead)
+              Container(
+                margin: const EdgeInsets.only(left: 8),
+                width: 8,
+                height: 8,
+                decoration: const BoxDecoration(
+                  color: AppTheme.primaryColor,
+                  shape: BoxShape.circle,
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -1128,14 +1301,13 @@ class PlacesContent extends StatefulWidget {
 }
 
 class _PlacesContentState extends State<PlacesContent> {
-  final Map<String, bool> _placeToggles = {
-    'Home': true,
-    'Office': true,
-    'School': false,
-  };
-
   @override
   Widget build(BuildContext context) {
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    
+    if (userId == null) {
+      return const Center(child: Text('Please log in.'));
+    }
     return SafeArea(
       child: Column(
         children: [
@@ -1158,13 +1330,66 @@ class _PlacesContentState extends State<PlacesContent> {
             ),
           ),
           Expanded(
-            child: ListView(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              children: [
-                _buildPlaceItem(context, 'Home', Icons.home_rounded, Colors.green),
-                _buildPlaceItem(context, 'Office', Icons.work_rounded, Colors.orange),
-                _buildPlaceItem(context, 'School', Icons.school_rounded, Colors.blue),
-              ],
+            child: StreamBuilder<DocumentSnapshot>(
+              stream: FirebaseFirestore.instance.collection('users').doc(userId).snapshots(),
+              builder: (context, userSnapshot) {
+                if (userSnapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                
+                final userData = userSnapshot.data?.data() as Map<String, dynamic>?;
+                final familyId = userData?['currentFamilyId'] as String?;
+                
+                if (familyId == null) {
+                  return const Center(child: Text('Join a family to view places.'));
+                }
+
+                return StreamBuilder<List<GeofenceModel>>(
+                    stream: FamilyService().getGeofencesStream(familyId),
+                    builder: (context, snapshot) {
+                      if (snapshot.connectionState == ConnectionState.waiting) {
+                        return const Center(child: CircularProgressIndicator());
+                      }
+                      
+                      if (snapshot.hasError) {
+                        return Center(child: Text('Error: ${snapshot.error}'));
+                      }
+                      
+                      final geofences = snapshot.data ?? [];
+                      final defaultPlaces = ['Home', 'Office', 'School'];
+                      final displayList = <dynamic>[];
+                      
+                      for (final name in defaultPlaces) {
+                        try {
+                          final found = geofences.firstWhere((g) => g.name.toLowerCase() == name.toLowerCase());
+                          displayList.add(found);
+                        } catch (_) {
+                          displayList.add(name);
+                        }
+                      }
+                      
+                      for (final g in geofences) {
+                        if (!defaultPlaces.any((name) => name.toLowerCase() == g.name.toLowerCase())) {
+                          displayList.add(g);
+                        }
+                      }
+
+                      return ListView.builder(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        itemCount: displayList.length,
+                        itemBuilder: (context, index) {
+                          final item = displayList[index];
+                          if (item is GeofenceModel) {
+                            return _buildGeofenceItem(context, item);
+                          } else if (item is String) {
+                            return _buildPlaceholderItem(context, item);
+                          }
+                          return const SizedBox.shrink();
+                        },
+                      );
+                    },
+                  );
+              },
             ),
           ),
         ],
@@ -1172,67 +1397,160 @@ class _PlacesContentState extends State<PlacesContent> {
     );
   }
 
-  Widget _buildPlaceItem(BuildContext context, String name, IconData icon, Color color) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 10,
-            offset: const Offset(0, 2),
-          ),
-        ],
+  Widget _buildGeofenceItem(BuildContext context, GeofenceModel geofence) {
+    // Basic mapping for icons if we stored them as string, fallback to default
+    IconData icon = Icons.location_on_rounded;
+    Color color = AppTheme.primaryColor;
+    if (geofence.name.toLowerCase().contains('home')) {
+      icon = Icons.home_rounded;
+      color = Colors.green;
+    } else if (geofence.name.toLowerCase().contains('office') || geofence.name.toLowerCase().contains('work')) {
+      icon = Icons.work_rounded;
+      color = Colors.orange;
+    } else if (geofence.name.toLowerCase().contains('school')) {
+      icon = Icons.school_rounded;
+      color = Colors.blue;
+    }
+
+    return GestureDetector(
+      onTap: () => Navigator.pushNamed(
+        context, 
+        AppRoutes.createGeofence, 
+        arguments: {'existingGeofence': geofence},
       ),
-      child: Row(
-        children: [
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: color.withOpacity(0.1),
-              borderRadius: BorderRadius.circular(12),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.05),
+              blurRadius: 10,
+              offset: const Offset(0, 2),
             ),
-            child: Icon(icon, color: color),
-          ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  name,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w600,
-                    fontSize: 16,
-                    color: AppTheme.textPrimary,
-                  ),
-                ),
-                const Text(
-                  '200m radius • All members',
-                  style: TextStyle(
-                    color: AppTheme.textSecondary,
-                    fontSize: 12,
-                  ),
-                ),
-              ],
+          ],
+        ),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: color.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(icon, color: color),
             ),
-          ),
-          Switch(
-            value: _placeToggles[name] ?? false,
-            onChanged: (value) {
-              setState(() {
-                _placeToggles[name] = value;
-              });
-            },
-            activeColor: AppTheme.primaryColor,
-          ),
-        ],
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    geofence.name,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 16,
+                      color: AppTheme.textPrimary,
+                    ),
+                  ),
+                  Text(
+                    '${geofence.radiusMeters.toInt()}m radius • ${geofence.monitoredMembers.isEmpty ? 'All members' : '${geofence.monitoredMembers.length} members'}',
+                    style: const TextStyle(
+                      color: AppTheme.textSecondary,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Switch(
+              value: geofence.isActive,
+              onChanged: (value) async {
+                final updated = geofence.copyWith(isActive: value);
+                await FamilyService().updateGeofence(updated);
+              },
+              activeColor: AppTheme.primaryColor,
+            ),
+          ],
+        ),
       ),
     );
   }
+
+  Widget _buildPlaceholderItem(BuildContext context, String name) {
+    IconData icon = Icons.location_on_rounded;
+    Color color = AppTheme.primaryColor;
+    if (name.toLowerCase().contains('home')) {
+      icon = Icons.home_rounded;
+      color = Colors.green;
+    } else if (name.toLowerCase().contains('office') || name.toLowerCase().contains('work')) {
+      icon = Icons.work_rounded;
+      color = Colors.orange;
+    } else if (name.toLowerCase().contains('school')) {
+      icon = Icons.school_rounded;
+      color = Colors.blue;
+    }
+
+    return GestureDetector(
+      onTap: () => Navigator.pushNamed(
+        context, 
+        AppRoutes.createGeofence, 
+        arguments: {'initialName': name},
+      ),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.grey.withOpacity(0.2)),
+        ),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.grey.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(icon, color: Colors.grey),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    name,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 16,
+                      color: Colors.grey,
+                    ),
+                  ),
+                  const Text(
+                    'Not Setup • Tap to add',
+                    style: TextStyle(
+                      color: Colors.grey,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Switch(
+              value: false,
+              onChanged: null, // Disabled switch
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+
 }
 
 // Settings Content
@@ -1279,7 +1597,22 @@ class _SettingsContentState extends State<SettingsContent> {
     Navigator.pop(context); // Close loading dialog
 
     final nameController = TextEditingController(text: name);
-    final phoneController = TextEditingController(text: phone);
+    
+    final List<String> countryCodes = [
+      '+91', '+1', '+44', '+61', '+971', '+65', '+81', '+86', '+49', '+33'
+    ];
+    String selectedCountryCode = '+91';
+    String phoneNumberPart = phone;
+
+    for (final code in countryCodes) {
+      if (phone.startsWith(code)) {
+        selectedCountryCode = code;
+        phoneNumberPart = phone.substring(code.length);
+        break;
+      }
+    }
+    
+    final phoneController = TextEditingController(text: phoneNumberPart);
     bool isSaving = false;
     
     showDialog(
@@ -1305,14 +1638,38 @@ class _SettingsContentState extends State<SettingsContent> {
                 enabled: !isSaving,
               ),
               const SizedBox(height: 12),
-              TextField(
-                controller: phoneController,
-                decoration: const InputDecoration(
-                  labelText: 'Phone Number',
-                  prefixIcon: Icon(Icons.phone_outlined),
-                ),
-                keyboardType: TextInputType.phone,
-                enabled: !isSaving,
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    height: 56, // matching default TextField height roughly
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.grey.shade400),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<String>(
+                        value: selectedCountryCode,
+                        items: countryCodes.map((code) => DropdownMenuItem(value: code, child: Text(code))).toList(),
+                        onChanged: isSaving ? null : (value) {
+                          if (value != null) setDialogState(() => selectedCountryCode = value);
+                        },
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      controller: phoneController,
+                      decoration: const InputDecoration(
+                        labelText: 'Phone Number',
+                      ),
+                      keyboardType: TextInputType.phone,
+                      enabled: !isSaving,
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
@@ -1324,8 +1681,10 @@ class _SettingsContentState extends State<SettingsContent> {
             ElevatedButton(
               onPressed: isSaving ? null : () async {
                 final newName = nameController.text.trim();
-                final newPhone = phoneController.text.trim();
+                final rawPhone = phoneController.text.trim();
                 if (newName.isEmpty) return;
+                
+                final newPhone = rawPhone.isEmpty ? '' : '$selectedCountryCode$rawPhone';
 
                 setDialogState(() => isSaving = true);
                 
@@ -1876,8 +2235,8 @@ class _SettingsContentState extends State<SettingsContent> {
                       onPressed: () async {
                         Navigator.pop(context);
                         await Share.share(
-                          'Join my family on FamilyNest! Use code: $inviteCode\n\nDownload the app: https://familynest.app',
-                          subject: 'Join my family on FamilyNest!',
+                          'Join my family on Flockar! Use code: $inviteCode\n\nDownload the app: https://flockar.niteeshkumar.online',
+                          subject: 'Join my family on Flockar!',
                         );
                       },
                       icon: const Icon(Icons.share_rounded),
@@ -1990,11 +2349,11 @@ class _SettingsContentState extends State<SettingsContent> {
           const SizedBox(height: 16),
           _buildSettingsSection(context, 'Support', [
             _buildSettingsTile(context, 'Privacy Policy', Icons.privacy_tip_outlined, 
-                () => _showInfoDialog('Privacy Policy', 'FamilyNest respects your privacy.\n\n• We collect location data only with your consent\n• Data is shared only with your family members\n• You can disable location sharing anytime\n• We do not sell your data to third parties\n• All data is encrypted and secure')),
+                () => Navigator.pushNamed(context, AppRoutes.privacy)),
             _buildSettingsTile(context, 'Terms of Service', Icons.description_outlined,
-                () => _showInfoDialog('Terms of Service', 'By using FamilyNest, you agree to:\n\n• Use the app responsibly\n• Not misuse location tracking features\n• Respect other family members\' privacy\n• Keep your account secure\n• Report any issues or concerns')),
+                () => Navigator.pushNamed(context, AppRoutes.terms)),
             _buildSettingsTile(context, 'Help & Support', Icons.help_outline_rounded,
-                () => _showInfoDialog('Help & Support', 'Need help?\n\n📧 Email: support@familynest.app\n📞 Phone: 1800-123-4567\n\n💡 Tips:\n• Make sure location services are enabled\n• Keep the app updated\n• Check notification settings\n\nFAQ available at familynest.app/help')),
+                () => Navigator.pushNamed(context, AppRoutes.helpSupport)),
           ]),
           const SizedBox(height: 16),
           _buildSettingsSection(context, 'Account Actions', [
@@ -2007,7 +2366,7 @@ class _SettingsContentState extends State<SettingsContent> {
           const SizedBox(height: 24),
           const Center(
             child: Text(
-              'FamilyNest v1.0.0',
+              'Flockar v1.0.0',
               style: TextStyle(color: AppTheme.textHint, fontSize: 12),
             ),
           ),

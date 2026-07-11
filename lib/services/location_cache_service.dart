@@ -23,7 +23,7 @@ class LocationCacheService {
 
   Future<Database> _initDatabase() async {
     final dbPath = await getDatabasesPath();
-    final dbFile = '$dbPath/familynest_location_cache.db';
+    final dbFile = '$dbPath/Flockar_location_cache.db';
 
     return openDatabase(
       dbFile,

@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../../config/theme_config.dart';
 import '../../../config/routes.dart';
 import '../../../services/family_service.dart';
+import '../../../services/background_service.dart';
 
 class ManageNestScreen extends StatefulWidget {
   const ManageNestScreen({super.key});
@@ -25,6 +27,26 @@ class _ManageNestScreenState extends State<ManageNestScreen> {
     _loadFamilyInfo();
   }
 
+  Future<void> _loadLocationSharingPref() async {
+    if (_familyInfo == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(() {
+        _locationSharing = prefs.getBool('location_sharing_enabled_${_familyInfo!.id}') ?? true;
+      });
+    }
+  }
+
+  Future<void> _toggleLocationSharing(bool value) async {
+    if (_familyInfo == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('location_sharing_enabled_${_familyInfo!.id}', value);
+    BackgroundLocationService().setLocationSharingEnabled(_familyInfo!.id, value);
+    if (mounted) {
+      setState(() => _locationSharing = value);
+    }
+  }
+
   Future<void> _loadFamilyInfo() async {
     try {
       final info = await _familyService.getCurrentFamilyInfo();
@@ -33,6 +55,7 @@ class _ManageNestScreenState extends State<ManageNestScreen> {
           _familyInfo = info;
           _isLoading = false;
         });
+        _loadLocationSharingPref();
       }
     } catch (e) {
       if (mounted) {
@@ -92,6 +115,8 @@ class _ManageNestScreenState extends State<ManageNestScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isAdmin = _familyInfo?.createdBy == _familyService.currentUserId;
+
     return Scaffold(
       backgroundColor: const Color(0xFF0D0D0D),
       appBar: AppBar(
@@ -210,25 +235,26 @@ class _ManageNestScreenState extends State<ManageNestScreen> {
                           ],
                         ),
                       ),
-                      _isRegeneratingCode
-                          ? const SizedBox(
-                              width: 24,
-                              height: 24,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: AppTheme.primaryColor,
-                              ),
-                            )
-                          : TextButton(
-                              onPressed: _regenerateCode,
-                              child: const Text(
-                                'REGENERATE',
-                                style: TextStyle(
-                                  color: Color(0xFF4285F4),
-                                  fontWeight: FontWeight.w600,
+                      if (isAdmin)
+                        _isRegeneratingCode
+                            ? const SizedBox(
+                                width: 24,
+                                height: 24,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: AppTheme.primaryColor,
+                                ),
+                              )
+                            : TextButton(
+                                onPressed: _regenerateCode,
+                                child: const Text(
+                                  'REGENERATE',
+                                  style: TextStyle(
+                                    color: Color(0xFF4285F4),
+                                    fontWeight: FontWeight.w600,
+                                  ),
                                 ),
                               ),
-                            ),
                     ],
                   ),
                   const SizedBox(height: 16),
@@ -257,16 +283,17 @@ class _ManageNestScreenState extends State<ManageNestScreen> {
                           ),
                         ),
                       ),
-                      TextButton(
-                        onPressed: () => _showEditNameDialog(),
-                        child: const Text(
-                          'EDIT',
-                          style: TextStyle(
-                            color: Color(0xFF4285F4),
-                            fontWeight: FontWeight.w600,
+                      if (isAdmin)
+                        TextButton(
+                          onPressed: () => _showEditNameDialog(),
+                          child: const Text(
+                            'EDIT',
+                            style: TextStyle(
+                              color: Color(0xFF4285F4),
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
                         ),
-                      ),
                     ],
                   ),
                   const SizedBox(height: 16),
@@ -324,9 +351,7 @@ class _ManageNestScreenState extends State<ManageNestScreen> {
                       ),
                       Switch(
                         value: _locationSharing,
-                        onChanged: (val) {
-                          setState(() => _locationSharing = val);
-                        },
+                        onChanged: _toggleLocationSharing,
                         activeColor: Colors.white,
                         activeTrackColor: const Color(0xFF4285F4),
                       ),
@@ -336,9 +361,19 @@ class _ManageNestScreenState extends State<ManageNestScreen> {
                   const Divider(color: Colors.white24, height: 1),
 
                   // Menu Items
-                  _buildMenuItem('Remove Members from nest', null, icon: Icons.chevron_right),
-                  const Divider(color: Colors.white24, height: 1),
-                  _buildMenuItem('Edit Member Details', null, icon: Icons.chevron_right),
+                  _buildMenuItem(
+                    isAdmin ? 'Manage Members' : 'View Members', 
+                    () {
+                      if (_familyInfo != null) {
+                        Navigator.pushNamed(
+                          context, 
+                          AppRoutes.manageMembers,
+                          arguments: {'familyId': _familyInfo!.id},
+                        );
+                      }
+                    }, 
+                    icon: Icons.chevron_right,
+                  ),
                   const Divider(color: Colors.white24, height: 1),
                   const SizedBox(height: 24),
 
@@ -349,13 +384,15 @@ class _ManageNestScreenState extends State<ManageNestScreen> {
                     leadingIcon: Icons.exit_to_app,
                     color: AppTheme.errorColor,
                   ),
-                  const SizedBox(height: 8),
-                  _buildMenuItem(
-                    'Delete nest',
-                    () => _showDeleteConfirmation(),
-                    leadingIcon: Icons.delete_outline,
-                    color: AppTheme.errorColor,
-                  ),
+                  if (isAdmin) ...[
+                    const SizedBox(height: 8),
+                    _buildMenuItem(
+                      'Delete nest',
+                      () => _showDeleteConfirmation(),
+                      leadingIcon: Icons.delete_outline,
+                      color: AppTheme.errorColor,
+                    ),
+                  ],
                 ],
               ),
             ),

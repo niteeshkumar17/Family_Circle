@@ -1,6 +1,6 @@
 // App Configuration
 class AppConfig {
-  static const String appName = 'FamilyNest';
+  static const String appName = 'Flockar';
   static const String appVersion = '1.0.0';
   
   // Location settings

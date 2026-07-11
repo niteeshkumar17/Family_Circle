@@ -5,9 +5,11 @@ import 'package:geocoding/geocoding.dart' hide Location;
 import 'package:battery_plus/battery_plus.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../data/models/location_model.dart';
 import '../data/models/geofence_model.dart';
 import 'dart:math' as math;
+import 'family_service.dart';
 
 /// Location Service
 /// 
@@ -22,6 +24,7 @@ class LocationService {
   final Battery _battery = Battery();
   
   StreamSubscription<LocationData>? _positionSubscription;
+  StreamSubscription<List<GeofenceModel>>? _geofenceSubscription;
   final _locationController = StreamController<LocationModel>.broadcast();
   
   String? _userId;
@@ -43,6 +46,11 @@ class LocationService {
   }) async {
     _userId = userId;
     _familyId = familyId;
+    
+    _geofenceSubscription?.cancel();
+    _geofenceSubscription = FamilyService().getGeofencesStream(familyId).listen((geofences) {
+      setGeofences(geofences);
+    });
   }
 
   /// Check and request location permissions
@@ -73,9 +81,11 @@ class LocationService {
     }
 
     try {
-      await _location.enableBackgroundMode(enable: true);
+      // Background mode is handled purely by flutter_background_service now.
+      // Do NOT call _location.enableBackgroundMode(enable: true) here, as it 
+      // creates a duplicate foreground service notification ("Location background service running").
     } catch (e) {
-      // Background mode may not be supported or permitted
+      // Handle gracefully
     }
 
     // Configure location settings
@@ -109,6 +119,16 @@ class LocationService {
   /// Handle position updates
   Future<void> _onPositionUpdate(LocationData position) async {
     _lastPosition = position;
+
+    // Save to SharedPreferences so the background isolate can read the last known position
+    // if the GPS blocks updates when stationary in the background.
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (position.latitude != null && position.longitude != null) {
+        await prefs.setDouble('bg_last_lat', position.latitude!);
+        await prefs.setDouble('bg_last_lng', position.longitude!);
+      }
+    } catch (_) {}
 
     // Get battery info
     try {

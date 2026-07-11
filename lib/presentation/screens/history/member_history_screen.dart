@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:intl/intl.dart';
 import '../../../config/theme_config.dart';
+import '../../../services/family_service.dart';
 import 'dart:math' as math;
 
 class MemberHistoryScreen extends StatefulWidget {
@@ -37,11 +38,84 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
   Future<void> _loadHistoryForDate(DateTime date) async {
     setState(() => _isLoading = true);
 
-    // Simulate API call delay
-    await Future.delayed(const Duration(milliseconds: 800));
+    final historyData = await FamilyService().getLocationHistory(widget.memberId, date);
 
-    // Generate mock data based on date
-    _generateMockData(date);
+    _markers.clear();
+    _polylines.clear();
+    _events.clear();
+
+    if (historyData.isNotEmpty) {
+      List<LatLng> points = [];
+      
+      for (int i = 0; i < historyData.length; i++) {
+        final data = historyData[i];
+        final lat = (data['latitude'] as num).toDouble();
+        final lng = (data['longitude'] as num).toDouble();
+        final timestamp = data['timestamp'] as int;
+        final address = data['address'] as String?;
+        final time = DateTime.fromMillisecondsSinceEpoch(timestamp);
+        
+        final point = LatLng(lat, lng);
+        points.add(point);
+        
+        bool shouldAddEvent = false;
+        String title = 'Location Update';
+        IconData icon = Icons.location_on;
+        Color color = AppTheme.primaryColor;
+        
+        if (i == 0) {
+          shouldAddEvent = true;
+          title = 'First recorded location';
+          icon = Icons.play_circle_fill;
+          color = Colors.green;
+        } else if (i == historyData.length - 1) {
+          shouldAddEvent = true;
+          title = 'Last recorded location';
+          icon = Icons.stop_circle;
+          color = Colors.red;
+        } else {
+          final prevData = historyData[i - 1];
+          final prevTime = DateTime.fromMillisecondsSinceEpoch(prevData['timestamp'] as int);
+          if (time.difference(prevTime).inMinutes > 30) {
+             shouldAddEvent = true;
+             title = 'Location update after gap';
+             icon = Icons.update;
+             color = Colors.orange;
+          }
+        }
+        
+        if (shouldAddEvent) {
+          _events.add(HistoryEvent(
+            time: time,
+            title: title,
+            location: address,
+            icon: icon,
+            color: color,
+          ));
+          
+          _markers.add(Marker(
+            markerId: MarkerId('stop_$i'),
+            position: point,
+            icon: BitmapDescriptor.defaultMarkerWithHue(
+              i == 0 ? BitmapDescriptor.hueGreen : (i == historyData.length - 1 ? BitmapDescriptor.hueRed : BitmapDescriptor.hueOrange)
+            ),
+            infoWindow: InfoWindow(title: DateFormat('hh:mm a').format(time), snippet: address),
+          ));
+        }
+      }
+
+      if (points.isNotEmpty) {
+        _polylines.add(Polyline(
+          polylineId: const PolylineId('route'),
+          points: points,
+          color: AppTheme.primaryColor,
+          width: 4,
+          jointType: JointType.round,
+        ));
+      }
+    } else {
+      // Show empty state indicator or rely on UI to show no events
+    }
 
     setState(() => _isLoading = false);
     
@@ -49,80 +123,6 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
     if (_polylines.isNotEmpty && _mapController != null) {
       Future.delayed(const Duration(milliseconds: 300), _fitBounds);
     }
-  }
-
-  void _generateMockData(DateTime date) {
-    _markers.clear();
-    _polylines.clear();
-    _events.clear();
-
-    final random = math.Random(date.day); // Seed with day for consistent "random" data per day
-
-    // Base location (Home)
-    const homeLat = 28.6139;
-    const homeLng = 77.2090;
-
-    // Generate 3-5 stops
-    int numStops = 3 + random.nextInt(3);
-    List<LatLng> points = [const LatLng(homeLat, homeLng)];
-    
-    // Create Events
-    _events.add(HistoryEvent(
-      time: DateTime(date.year, date.month, date.day, 8, 30),
-      title: 'Left Home',
-      icon: Icons.home_rounded,
-      color: Colors.green,
-    ));
-
-    double currentLat = homeLat;
-    double currentLng = homeLng;
-
-    for (int i = 0; i < numStops; i++) {
-      // Move randomly
-      currentLat += (random.nextDouble() - 0.5) * 0.05;
-      currentLng += (random.nextDouble() - 0.5) * 0.05;
-      LatLng point = LatLng(currentLat, currentLng);
-      points.add(point);
-
-      // Add marker
-      _markers.add(Marker(
-        markerId: MarkerId('stop_$i'),
-        position: point,
-        icon: BitmapDescriptor.defaultMarkerWithHue(
-          [BitmapDescriptor.hueRed, BitmapDescriptor.hueBlue, BitmapDescriptor.hueOrange][i % 3]
-        ),
-        infoWindow: InfoWindow(title: 'Stop ${i + 1}'),
-      ));
-
-      // Add event
-      int hour = 9 + (i * 3) + random.nextInt(2);
-      int minute = random.nextInt(60);
-      _events.add(HistoryEvent(
-        time: DateTime(date.year, date.month, date.day, hour, minute),
-        title: ['Arrived at Office', 'Visited Mall', 'Stopped at Gas Station', 'Picked up Kids'][i % 4],
-        icon: [Icons.work, Icons.shopping_bag, Icons.local_gas_station, Icons.school][i % 4],
-        color: AppTheme.primaryColor,
-        location: 'Sector ${10 + random.nextInt(50)}, Delhi',
-      ));
-    }
-
-    // Return home
-    points.add(const LatLng(homeLat, homeLng));
-    _events.add(HistoryEvent(
-      time: DateTime(date.year, date.month, date.day, 19, 45),
-      title: 'Arrived at Home',
-      icon: Icons.home_rounded,
-      color: Colors.green,
-    ));
-
-    // Create polyline
-    _polylines.add(Polyline(
-      polylineId: const PolylineId('route'),
-      points: points,
-      color: AppTheme.primaryColor,
-      width: 4,
-      jointType: JointType.round,
-    ));
   }
 
   void _fitBounds() {
@@ -315,91 +315,121 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
                   ),
                   const Divider(height: 1),
                   Expanded(
-                    child: ListView.builder(
-                      padding: const EdgeInsets.all(20),
-                      itemCount: _events.length,
-                      itemBuilder: (context, index) {
-                        final event = _events[index];
-                        final isLast = index == _events.length - 1;
-                        
-                        return IntrinsicHeight(
-                          child: Row(
-                            children: [
-                              Column(
+                    child: _events.isEmpty
+                        ? const Center(
+                            child: Padding(
+                              padding: EdgeInsets.all(32.0),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
                                 children: [
+                                  Icon(Icons.location_off, size: 48, color: Colors.grey),
+                                  SizedBox(height: 16),
                                   Text(
-                                    DateFormat('h:mm a').format(event.time),
-                                    style: const TextStyle(
+                                    'No location history found',
+                                    style: TextStyle(
                                       color: Colors.grey,
-                                      fontSize: 12,
+                                      fontSize: 16,
                                       fontWeight: FontWeight.w500,
                                     ),
                                   ),
-                                  if (!isLast)
-                                    Expanded(
-                                      child: Container(
-                                        width: 2,
-                                        color: Colors.grey[200],
-                                        margin: const EdgeInsets.only(top: 4, bottom: 4),
-                                      ),
+                                  SizedBox(height: 8),
+                                  Text(
+                                    'Location data for this date was not recorded or is unavailable.',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      color: Colors.grey,
+                                      fontSize: 13,
                                     ),
-                                ],
-                              ),
-                              const SizedBox(width: 16),
-                              Column(
-                                children: [
-                                  Container(
-                                    padding: const EdgeInsets.all(8),
-                                    decoration: BoxDecoration(
-                                      color: event.color.withOpacity(0.1),
-                                      shape: BoxShape.circle,
-                                    ),
-                                    child: Icon(event.icon, color: event.color, size: 20),
                                   ),
-                                  if (!isLast)
-                                    Expanded(
-                                      child: Container(
-                                        width: 2,
-                                        color: Colors.grey[200],
-                                        margin: const EdgeInsets.symmetric(vertical: 4),
-                                      ),
-                                    ),
                                 ],
                               ),
-                              const SizedBox(width: 16),
-                              Expanded(
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(vertical: 4),
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        event.title,
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.w600,
-                                          fontSize: 16,
-                                        ),
-                                      ),
-                                      if (event.location != null) ...[
-                                        const SizedBox(height: 2),
+                            ),
+                          )
+                        : ListView.builder(
+                            padding: const EdgeInsets.all(20),
+                            itemCount: _events.length,
+                            itemBuilder: (context, index) {
+                              final event = _events[index];
+                              final isLast = index == _events.length - 1;
+                              
+                              return IntrinsicHeight(
+                                child: Row(
+                                  children: [
+                                    Column(
+                                      children: [
                                         Text(
-                                          event.location!,
+                                          DateFormat('h:mm a').format(event.time),
                                           style: const TextStyle(
                                             color: Colors.grey,
-                                            fontSize: 13,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w500,
                                           ),
                                         ),
+                                        if (!isLast)
+                                          Expanded(
+                                            child: Container(
+                                              width: 2,
+                                              color: Colors.grey[200],
+                                              margin: const EdgeInsets.only(top: 4, bottom: 4),
+                                            ),
+                                          ),
                                       ],
-                                      const SizedBox(height: 16),
-                                    ],
-                                  ),
+                                    ),
+                                    const SizedBox(width: 16),
+                                    Column(
+                                      children: [
+                                        Container(
+                                          padding: const EdgeInsets.all(8),
+                                          decoration: BoxDecoration(
+                                            color: event.color.withOpacity(0.1),
+                                            shape: BoxShape.circle,
+                                          ),
+                                          child: Icon(event.icon, color: event.color, size: 20),
+                                        ),
+                                        if (!isLast)
+                                          Expanded(
+                                            child: Container(
+                                              width: 2,
+                                              color: Colors.grey[200],
+                                              margin: const EdgeInsets.symmetric(vertical: 4),
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                    const SizedBox(width: 16),
+                                    Expanded(
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(vertical: 4),
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              event.title,
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.w600,
+                                                fontSize: 16,
+                                              ),
+                                            ),
+                                            if (event.location != null) ...[
+                                              const SizedBox(height: 2),
+                                              Text(
+                                                event.location!,
+                                                style: const TextStyle(
+                                                  color: Colors.grey,
+                                                  fontSize: 13,
+                                                ),
+                                              ),
+                                            ],
+                                            const SizedBox(height: 16),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ],
                                 ),
-                              ),
-                            ],
+                              );
+                            },
                           ),
-                        );
-                      },
-                    ),
                   ),
                 ],
               ),
@@ -413,8 +443,25 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
   String _calcTotalDist() {
     if (_polylines.isEmpty) return '0.0';
     
-    // Simple mock calculation for display
-    return (25.5 + math.Random(_selectedDate.day).nextDouble() * 10).toStringAsFixed(1);
+    double totalDistance = 0.0;
+    final points = _polylines.first.points;
+    for (int i = 0; i < points.length - 1; i++) {
+      totalDistance += _calculateDistance(
+        points[i].latitude, points[i].longitude,
+        points[i+1].latitude, points[i+1].longitude
+      );
+    }
+    
+    return totalDistance.toStringAsFixed(1);
+  }
+
+  double _calculateDistance(double lat1, double lon1, double lat2, double lon2) {
+    var p = 0.017453292519943295;
+    var c = math.cos;
+    var a = 0.5 - c((lat2 - lat1) * p)/2 + 
+          c(lat1 * p) * c(lat2 * p) * 
+          (1 - c((lon2 - lon1) * p))/2;
+    return 12742 * math.asin(math.sqrt(a));
   }
 }
 

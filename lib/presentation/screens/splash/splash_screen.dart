@@ -151,7 +151,7 @@ class _SplashScreenState extends State<SplashScreen> {
               
               // App Name
               Text(
-                'FamilyNest',
+                'Flockar',
                 style: Theme.of(context).textTheme.headlineLarge?.copyWith(
                   color: Colors.white,
                   fontWeight: FontWeight.bold,

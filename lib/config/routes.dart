@@ -12,6 +12,10 @@ import '../presentation/screens/sos/sos_screen.dart';
 import '../presentation/screens/family/manage_nest_screen.dart';
 // Placeholder imports
 import '../presentation/screens/placeholder_screens.dart';
+import '../presentation/screens/family/manage_members_screen.dart';
+import '../presentation/screens/legal/privacy_policy_screen.dart';
+import '../presentation/screens/legal/terms_of_service_screen.dart';
+import '../presentation/screens/legal/help_support_screen.dart';
 
 class AppRoutes {
   static const String splash = '/';
@@ -31,8 +35,11 @@ class AppRoutes {
   static const String createGeofence = '/create-geofence';
   static const String sos = '/sos';
   static const String manageNest = '/manage-nest';
+  static const String manageMembers = '/manage-members';
   static const String settings = '/settings';
   static const String privacy = '/privacy';
+  static const String terms = '/terms';
+  static const String helpSupport = '/help-support';
 
   static Route<dynamic> generateRoute(RouteSettings settings) {
     switch (settings.name) {
@@ -74,13 +81,26 @@ class AppRoutes {
       case geofence:
         return _buildRoute(const GeofenceScreen());
       case createGeofence:
-        return _buildRoute(const CreateGeofenceScreen());
+        final args = settings.arguments as Map<String, dynamic>?;
+        return _buildRoute(CreateGeofenceScreen(
+          initialName: args?['initialName'],
+          existingGeofence: args?['existingGeofence'],
+        ));
       case sos:
         return _buildRoute(const SosScreen());
       case manageNest:
         return _buildRoute(const ManageNestScreen());
+      case manageMembers:
+        final args = settings.arguments as Map<String, dynamic>;
+        return _buildRoute(ManageMembersScreen(familyId: args['familyId']));
       case AppRoutes.settings:
         return _buildRoute(const SettingsScreen());
+      case privacy:
+        return _buildRoute(const PrivacyPolicyScreen());
+      case terms:
+        return _buildRoute(const TermsOfServiceScreen());
+      case helpSupport:
+        return _buildRoute(const HelpSupportScreen());
       default:
         return _buildRoute(const SplashScreen());
     }

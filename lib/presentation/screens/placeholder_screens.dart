@@ -2,11 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:location/location.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:flutter/services.dart';
 import 'dart:math' as math;
 import '../../config/theme_config.dart';
+import '../../config/app_config.dart';
+import '../../data/models/geofence_model.dart';
+import '../../services/family_service.dart';
 import 'history/member_history_screen.dart';
 
 class MapScreen extends StatelessWidget {
@@ -296,7 +300,7 @@ class FamilyScreen extends StatelessWidget {
           ),
           ElevatedButton.icon(
             onPressed: () {
-              Share.share('Join my FamilyNest circle with code: FAM-9283');
+              Share.share('Join my Flockar circle with code: FAM-9283');
               Navigator.pop(context);
             },
             icon: const Icon(Icons.share),
@@ -323,7 +327,14 @@ class GeofenceScreen extends StatelessWidget {
 }
 
 class CreateGeofenceScreen extends StatefulWidget {
-  const CreateGeofenceScreen({super.key});
+  final GeofenceModel? existingGeofence;
+  final String? initialName;
+  
+  const CreateGeofenceScreen({
+    super.key,
+    this.existingGeofence,
+    this.initialName,
+  });
 
   @override
   State<CreateGeofenceScreen> createState() => _CreateGeofenceScreenState();
@@ -340,7 +351,18 @@ class _CreateGeofenceScreenState extends State<CreateGeofenceScreen> {
   @override
   void initState() {
     super.initState();
-    _getCurrentLocation();
+    if (widget.existingGeofence != null) {
+      _selectedPosition = LatLng(widget.existingGeofence!.latitude, widget.existingGeofence!.longitude);
+      _radius = widget.existingGeofence!.radiusMeters;
+      _nameController.text = widget.existingGeofence!.name;
+      _isLoading = false;
+      _updateCircle();
+    } else {
+      if (widget.initialName != null) {
+        _nameController.text = widget.initialName!;
+      }
+      _getCurrentLocation();
+    }
   }
 
   @override
@@ -352,6 +374,27 @@ class _CreateGeofenceScreenState extends State<CreateGeofenceScreen> {
   Future<void> _getCurrentLocation() async {
     try {
       final location = Location();
+      bool serviceEnabled;
+      PermissionStatus permissionGranted;
+
+      serviceEnabled = await location.serviceEnabled();
+      if (!serviceEnabled) {
+        serviceEnabled = await location.requestService();
+        if (!serviceEnabled) {
+          setState(() => _isLoading = false);
+          return;
+        }
+      }
+
+      permissionGranted = await location.hasPermission();
+      if (permissionGranted == PermissionStatus.denied) {
+        permissionGranted = await location.requestPermission();
+        if (permissionGranted != PermissionStatus.granted) {
+          setState(() => _isLoading = false);
+          return;
+        }
+      }
+
       final locationData = await location.getLocation();
       if (locationData.latitude != null && locationData.longitude != null) {
         setState(() {
@@ -360,6 +403,8 @@ class _CreateGeofenceScreenState extends State<CreateGeofenceScreen> {
           _updateCircle();
         });
         _mapController?.animateCamera(CameraUpdate.newLatLngZoom(_selectedPosition, 15));
+      } else {
+        setState(() => _isLoading = false);
       }
     } catch (e) {
       debugPrint('Error getting location: $e');
@@ -385,9 +430,16 @@ class _CreateGeofenceScreenState extends State<CreateGeofenceScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Create Geofence'),
+        title: Text(widget.existingGeofence != null ? 'Update Geofence' : 'Create Geofence'),
         backgroundColor: Colors.transparent,
         elevation: 0,
+        actions: [
+          if (widget.existingGeofence != null)
+            IconButton(
+              icon: const Icon(Icons.delete_outline, color: Colors.red),
+              onPressed: () => _confirmDelete(context, widget.existingGeofence!),
+            ),
+        ],
       ),
       body: Column(
         children: [
@@ -502,21 +554,63 @@ class _CreateGeofenceScreenState extends State<CreateGeofenceScreen> {
                   SizedBox(
                     width: double.infinity,
                     child: ElevatedButton(
-                      onPressed: () {
-                        if (_nameController.text.isEmpty) {
+                      onPressed: () async {
+                        final name = _nameController.text.trim();
+                        if (name.isEmpty) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(content: Text('Please enter a place name')),
                           );
                           return;
                         }
+                        
+                        final familyId = FamilyService().currentFamilyId;
+                        if (familyId == null) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Error: No active family found')),
+                          );
+                          return;
+                        }
+
                         // Save geofence logic here
-                        Navigator.pop(context);
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text('Geofence "${_nameController.text}" created!'),
-                            backgroundColor: AppTheme.successColor,
-                          ),
-                        );
+                        setState(() => _isLoading = true);
+                        try {
+                          final geofence = GeofenceModel(
+                            id: widget.existingGeofence?.id ?? DateTime.now().millisecondsSinceEpoch.toString(),
+                            familyId: familyId,
+                            name: name,
+                            type: GeofenceType.custom,
+                            latitude: _selectedPosition.latitude,
+                            longitude: _selectedPosition.longitude,
+                            radiusMeters: _radius,
+                            createdBy: widget.existingGeofence?.createdBy ?? FamilyService().currentUserId ?? 'unknown',
+                            createdAt: widget.existingGeofence?.createdAt ?? DateTime.now(),
+                            settings: widget.existingGeofence?.settings ?? GeofenceSettings(),
+                            isActive: widget.existingGeofence?.isActive ?? true,
+                          );
+                          
+                          if (widget.existingGeofence != null) {
+                            await FamilyService().updateGeofence(geofence);
+                          } else {
+                            await FamilyService().addGeofence(geofence);
+                          }
+                          
+                          if (context.mounted) {
+                            Navigator.pop(context);
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text('Geofence "$name" created!'),
+                                backgroundColor: AppTheme.successColor,
+                              ),
+                            );
+                          }
+                        } catch (e) {
+                          if (context.mounted) {
+                            setState(() => _isLoading = false);
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Error: $e')),
+                            );
+                          }
+                        }
                       },
                       style: ElevatedButton.styleFrom(
                         backgroundColor: AppTheme.primaryColor,
@@ -534,6 +628,30 @@ class _CreateGeofenceScreenState extends State<CreateGeofenceScreen> {
                 ],
               ),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _confirmDelete(BuildContext context, GeofenceModel geofence) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete Place'),
+        content: Text('Are you sure you want to delete "${geofence.name}"?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              FamilyService().deleteGeofence(geofence.familyId, geofence.id);
+              Navigator.pop(context); // Close dialog
+              Navigator.pop(context); // Go back to Places tab
+            },
+            child: const Text('Delete', style: TextStyle(color: Colors.red)),
           ),
         ],
       ),
@@ -557,6 +675,7 @@ class MemberDetailScreen extends StatefulWidget {
   final double lng;
   final double speed;
   final bool isMoving;
+  final String? phone;
 
   const MemberDetailScreen({
     super.key,
@@ -568,6 +687,7 @@ class MemberDetailScreen extends StatefulWidget {
     required this.lng,
     this.speed = 0.0,
     this.isMoving = false,
+    this.phone,
   });
 
   @override
@@ -625,6 +745,19 @@ class _MemberDetailScreenState extends State<MemberDetailScreen> {
 
   Future<void> _getCurrentLocation() async {
     try {
+      // 1. Try to get instant location from SharedPreferences (background service cache)
+      final prefs = await SharedPreferences.getInstance();
+      final lat = prefs.getDouble('bg_last_lat');
+      final lng = prefs.getDouble('bg_last_lng');
+      
+      if (lat != null && lng != null) {
+        setState(() {
+          _currentLocation = LatLng(lat, lng);
+        });
+        return; // Return instantly!
+      }
+
+      // 2. Fallback to hardware GPS (can be slow)
       final location = Location();
       final locationData = await location.getLocation();
       if (locationData.latitude != null && locationData.longitude != null) {
@@ -656,7 +789,7 @@ class _MemberDetailScreenState extends State<MemberDetailScreen> {
       
       // NOTE: Using the API key from AndroidManifest.xml
       PolylineResult result = await polylinePoints.getRouteBetweenCoordinates(
-        googleApiKey: '***REMOVED***',
+        googleApiKey: 'AIzaSyCJmFTrE-O6VZSkYthgej0uHr_Cg-jfYuE',
         request: PolylineRequest(
           origin: PointLatLng(_currentLocation!.latitude, _currentLocation!.longitude),
           destination: PointLatLng(widget.lat, widget.lng),
@@ -724,8 +857,23 @@ class _MemberDetailScreenState extends State<MemberDetailScreen> {
       
       if (!mounted) return;
       
+      // Calculate distance for snackbar
+      double distance = _calculateDistance(
+        _currentLocation!.latitude,
+        _currentLocation!.longitude,
+        widget.lat,
+        widget.lng,
+      );
+
+      // Zoom to fit fallback route
+      LatLngBounds bounds = _createBounds([_currentLocation!, LatLng(widget.lat, widget.lng)]);
+      _mapController?.animateCamera(CameraUpdate.newLatLngBounds(bounds, 50));
+
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Direction Error: $e')),
+        SnackBar(
+          content: Text('${_formatDistance(distance)} • ${_calculateEstimatedTime(distance)} to ${widget.memberName} (Direct)'),
+          backgroundColor: AppTheme.primaryColor,
+        ),
       );
     }
   }
@@ -912,9 +1060,13 @@ class _MemberDetailScreenState extends State<MemberDetailScreen> {
                                     ),
                                   ),
                                   const SizedBox(width: 6),
-                                  Text(
-                                    widget.status,
-                                    style: TextStyle(color: Colors.grey[600]),
+                                  Expanded(
+                                    child: Text(
+                                      widget.status,
+                                      style: TextStyle(color: Colors.grey[600]),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
                                   ),
                                 ],
                                 if (widget.isMoving && widget.speed > 0) ...[
@@ -988,8 +1140,17 @@ class _MemberDetailScreenState extends State<MemberDetailScreen> {
                           height: 50,
                           child: OutlinedButton(
                             onPressed: () async {
+                              if (widget.phone == null || widget.phone!.isEmpty) {
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(content: Text('Phone number not available')),
+                                  );
+                                }
+                                return;
+                              }
+                              
                               try {
-                                final Uri phoneUri = Uri(scheme: 'tel', path: '+919876543210');
+                                final Uri phoneUri = Uri(scheme: 'tel', path: widget.phone);
                                 await launchUrl(phoneUri);
                               } catch (e) {
                                 if (context.mounted) {
@@ -1016,8 +1177,17 @@ class _MemberDetailScreenState extends State<MemberDetailScreen> {
                           height: 50,
                           child: OutlinedButton(
                             onPressed: () async {
+                              if (widget.phone == null || widget.phone!.isEmpty) {
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(content: Text('Phone number not available')),
+                                  );
+                                }
+                                return;
+                              }
+
                               try {
-                                final Uri smsUri = Uri(scheme: 'sms', path: '+919876543210');
+                                final Uri smsUri = Uri(scheme: 'sms', path: widget.phone);
                                 await launchUrl(smsUri);
                               } catch (e) {
                                 if (context.mounted) {
@@ -1037,47 +1207,43 @@ class _MemberDetailScreenState extends State<MemberDetailScreen> {
                         ),
                       ),
                       const SizedBox(width: 10),
-                      // Navigate button - shows route
+                      // Navigate button - opens Google Maps for true turn-by-turn navigation
                       Expanded(
                         flex: 3,
                         child: SizedBox(
                           height: 50,
                           child: ElevatedButton(
-                            onPressed: _isLoadingRoute ? null : _showRouteToMember,
+                            onPressed: () async {
+                              final Uri mapsUri = Uri.parse(
+                                  'https://www.google.com/maps/dir/?api=1&destination=${widget.lat},${widget.lng}');
+                              try {
+                                await launchUrl(mapsUri, mode: LaunchMode.externalApplication);
+                              } catch (e) {
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(content: Text('Could not launch Google Maps')),
+                                  );
+                                }
+                              }
+                            },
                             style: ElevatedButton.styleFrom(
-                              backgroundColor: _showingRoute ? AppTheme.successColor : AppTheme.primaryColor,
+                              backgroundColor: AppTheme.primaryColor,
                               padding: const EdgeInsets.symmetric(horizontal: 12),
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(12),
                               ),
                             ),
-                            child: _showingRoute
-                                ? Row(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      const Icon(Icons.navigation, color: Colors.white, size: 18),
-                                      const SizedBox(width: 6),
-                                      Text(
-                                        _formatDistance(_distanceKm),
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontWeight: FontWeight.w600,
-                                          fontSize: 14,
-                                        ),
-                                      ),
-                                    ],
-                                  )
-                                : const Row(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      Icon(Icons.directions, color: Colors.white, size: 20),
-                                      SizedBox(width: 6),
-                                      Text(
-                                        'Navigate',
-                                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
-                                      ),
-                                    ],
-                                  ),
+                            child: const Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(Icons.directions, color: Colors.white, size: 20),
+                                SizedBox(width: 6),
+                                Text(
+                                  'Navigate',
+                                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ),
@@ -1092,3 +1258,4 @@ class _MemberDetailScreenState extends State<MemberDetailScreen> {
     );
   }
 }
+

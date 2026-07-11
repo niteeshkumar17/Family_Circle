@@ -5,7 +5,7 @@ import 'package:family_nest/main.dart' as app;
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  group('FamilyNest E2E Full App Test', () {
+  group('Flockar E2E Full App Test', () {
     testWidgets('App Boots up and renders splash text', (WidgetTester tester) async {
       // Start the app
       app.main();
@@ -14,8 +14,8 @@ void main() {
       await tester.pumpAndSettle(const Duration(seconds: 5));
 
       // Use try/catch because we don't know the exact starting state
-      // We check if "FamilyNest" text is somewhere on the screen
-      final appNameFinder = find.text('FamilyNest');
+      // We check if "Flockar" text is somewhere on the screen
+      final appNameFinder = find.text('Flockar');
       if (appNameFinder.evaluate().isNotEmpty) {
          expect(appNameFinder, findsWidgets);
       }

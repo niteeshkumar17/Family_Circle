@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -99,7 +100,7 @@ class LoginScreen extends StatelessWidget {
                 ).animate().fadeIn(duration: 400.ms, delay: 200.ms).slideY(begin: 0.2),
                 
                 Text(
-                  'FamilyNest',
+                  'Flockar',
                   style: Theme.of(context).textTheme.headlineLarge?.copyWith(
                     fontWeight: FontWeight.bold,
                     color: Colors.white,
@@ -211,23 +212,27 @@ class LoginScreen extends StatelessWidget {
                       color: Colors.white.withOpacity(0.5),
                     ),
                     children: [
-                      const TextSpan(
+                      TextSpan(
                         text: 'Terms of Service',
-                        style: TextStyle(
+                        style: const TextStyle(
                           color: AppTheme.primaryColor,
                           fontWeight: FontWeight.w500,
                         ),
+                        recognizer: TapGestureRecognizer()
+                          ..onTap = () => Navigator.pushNamed(context, AppRoutes.terms),
                       ),
                       TextSpan(
                         text: ' and ',
                         style: TextStyle(color: Colors.white.withOpacity(0.5)),
                       ),
-                      const TextSpan(
+                      TextSpan(
                         text: 'Privacy Policy',
-                        style: TextStyle(
+                        style: const TextStyle(
                           color: AppTheme.primaryColor,
                           fontWeight: FontWeight.w500,
                         ),
+                        recognizer: TapGestureRecognizer()
+                          ..onTap = () => Navigator.pushNamed(context, AppRoutes.privacy),
                       ),
                     ],
                   ),

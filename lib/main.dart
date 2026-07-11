@@ -42,7 +42,7 @@ void main() async {
   // This provides a better user experience like professional apps.
 
   // Run the app
-  runApp(const FamilyNestApp());
+  runApp(const FlockarApp());
 }
 
 class FirebaseInitializationErrorApp extends StatelessWidget {
@@ -64,7 +64,7 @@ class FirebaseInitializationErrorApp extends StatelessWidget {
                 const Icon(Icons.error_outline, size: 64, color: Colors.red),
                 const SizedBox(height: 16),
                 const Text(
-                  'Unable to start FamilyNest',
+                  'Unable to start Flockar',
                   style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                   textAlign: TextAlign.center,
                 ),

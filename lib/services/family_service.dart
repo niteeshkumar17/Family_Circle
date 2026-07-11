@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 import '../data/models/location_model.dart';
+import '../data/models/geofence_model.dart';
 
 /// Family Service
 /// 
@@ -132,6 +133,48 @@ class FamilyService {
     return familyRef.id;
   }
 
+  /// Get all families the user belongs to
+  Future<List<FamilyInfo>> getUserFamilies() async {
+    final user = _auth.currentUser;
+    if (user == null) return [];
+
+    final userDoc = await _firestore.collection('users').doc(user.uid).get();
+    if (!userDoc.exists) return [];
+
+    final familyIds = List<String>.from(userDoc.data()?['familyIds'] ?? []);
+    if (familyIds.isEmpty) return [];
+
+    final families = <FamilyInfo>[];
+    for (final id in familyIds) {
+      final doc = await _firestore.collection('families').doc(id).get();
+      if (doc.exists) {
+        final data = doc.data()!;
+        families.add(FamilyInfo(
+          id: doc.id,
+          familyName: data['name'] ?? 'My Family',
+          inviteCode: data['inviteCode'],
+          memberCount: (data['memberIds'] as List?)?.length ?? 0,
+          createdBy: data['createdBy'],
+          createdByName: data['createdByName'],
+        ));
+      }
+    }
+    return families;
+  }
+
+  /// Switch the active family
+  Future<void> switchFamily(String familyId) async {
+    final user = _auth.currentUser;
+    if (user == null) throw Exception('User not authenticated');
+
+    await _firestore.collection('users').doc(user.uid).update({
+      'currentFamilyId': familyId,
+    });
+
+    _currentFamilyId = familyId;
+    _startListeningToFamily();
+  }
+
   /// Join a family with invite code
   Future<bool> joinFamily(String inviteCode) async {
     final user = _auth.currentUser;
@@ -256,21 +299,29 @@ class FamilyService {
             final isCurrent = memberId == currentUserId;
             
             String memberName = data['displayName'] ?? 'Unknown';
+            String? memberPhone = data['phone'] ?? data['phoneNumber'];
             
-            // Self-healing: if this is the current user, ensure family member name matches profile name
-            if (isCurrent) {
-              try {
-                final userDoc = await _firestore.collection('users').doc(memberId).get();
-                if (userDoc.exists) {
-                  final profileName = userDoc.data()?['displayName'] ?? userDoc.data()?['name'];
-                  if (profileName != null && profileName != memberName) {
-                    memberName = profileName;
-                    // Update in Firestore members subcollection asynchronously
+            // Self-healing and fetch latest profile data
+            try {
+              final userDoc = await _firestore.collection('users').doc(memberId).get();
+              if (userDoc.exists) {
+                final userData = userDoc.data()!;
+                final profileName = userData['displayName'] ?? userData['name'];
+                final profilePhone = userData['phone'] ?? userData['phoneNumber'];
+                
+                if (profilePhone != null && profilePhone.toString().isNotEmpty) {
+                  memberPhone = profilePhone;
+                }
+                
+                if (profileName != null) {
+                  memberName = profileName;
+                  // Self-healing: if this is the current user, ensure family member name matches profile name
+                  if (isCurrent && profileName != (data['displayName'] ?? '')) {
                     doc.reference.update({'displayName': profileName}).catchError((_) {});
                   }
                 }
-              } catch (_) {}
-            }
+              }
+            } catch (_) {}
             
             // Get real-time location from Realtime Database
             LocationModel? location;
@@ -296,6 +347,7 @@ class FamilyService {
               location: location,
               battery: location?.battery ?? 100,
               isCurrentUser: isCurrent,
+              phone: memberPhone,
             ));
           }
 
@@ -327,12 +379,20 @@ class FamilyService {
       final isCurrent = memberId == currentUserId;
       
       String memberName = data['displayName'] ?? 'Unknown';
+      String? memberPhone = data['phone'] ?? data['phoneNumber'];
       
       // Fetch user profile from Firestore to get their real name (from 'name' or 'displayName')
       try {
         final userDoc = await _firestore.collection('users').doc(memberId).get();
         if (userDoc.exists) {
-          final profileName = userDoc.data()?['displayName'] ?? userDoc.data()?['name'];
+          final userData = userDoc.data()!;
+          final profileName = userData['displayName'] ?? userData['name'];
+          final profilePhone = userData['phone'] ?? userData['phoneNumber'];
+          
+          if (profilePhone != null && profilePhone.toString().isNotEmpty) {
+            memberPhone = profilePhone;
+          }
+
           if (profileName != null) {
             memberName = profileName;
             
@@ -368,6 +428,7 @@ class FamilyService {
         location: location,
         battery: location?.battery ?? 100,
         isCurrentUser: isCurrent,
+        phone: memberPhone,
       ));
     }
 
@@ -388,6 +449,48 @@ class FamilyService {
           final data = event.snapshot.value as Map<dynamic, dynamic>;
           return LocationModel.fromRealtimeDb(data, memberId);
         });
+  }
+
+  /// Get location history for a member on a specific date
+  Future<List<Map<String, dynamic>>> getLocationHistory(String memberId, DateTime date) async {
+    if (_currentFamilyId == null) return [];
+
+    final dateKey = '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+    
+    try {
+      final snapshot = await _database
+          .ref('locationHistory/$_currentFamilyId/$memberId/$dateKey')
+          .get();
+
+      if (!snapshot.exists || snapshot.value == null) {
+        return [];
+      }
+
+      final data = snapshot.value as Map<dynamic, dynamic>;
+      final List<Map<String, dynamic>> history = [];
+
+      data.forEach((key, value) {
+        final pointData = value as Map<dynamic, dynamic>;
+        history.add({
+          'latitude': pointData['latitude'],
+          'longitude': pointData['longitude'],
+          'accuracy': pointData['accuracy'],
+          'speed': pointData['speed'],
+          'address': pointData['address'],
+          'battery': pointData['battery'],
+          'isCharging': pointData['isCharging'],
+          'timestamp': pointData['timestamp'] ?? int.parse(key.toString()),
+        });
+      });
+
+      // Sort chronologically
+      history.sort((a, b) => (a['timestamp'] as int).compareTo(b['timestamp'] as int));
+
+      return history;
+    } catch (e) {
+      print('Error fetching location history: $e');
+      return [];
+    }
   }
 
   /// Update current user's location
@@ -508,6 +611,46 @@ class FamilyService {
     // Stop listening and clear current family
     _familySubscription?.cancel();
     _currentFamilyId = null;
+  }
+
+  /// Remove a member from the family (admin only)
+  Future<void> removeMemberFromFamily(String familyId, String memberId) async {
+    final user = _auth.currentUser;
+    if (user == null) throw Exception('User not authenticated');
+
+    // Check if user is admin
+    final familyDoc = await _firestore.collection('families').doc(familyId).get();
+    if (familyDoc.data()?['createdBy'] != user.uid) {
+      throw Exception('Only the family admin can remove members');
+    }
+
+    // Remove user from family members subcollection
+    await _firestore
+        .collection('families')
+        .doc(familyId)
+        .collection('members')
+        .doc(memberId)
+        .delete();
+
+    // Remove user from family memberIds array
+    await _firestore.collection('families').doc(familyId).update({
+      'memberIds': FieldValue.arrayRemove([memberId]),
+    });
+
+    // Remove family from user's familyIds array and clear currentFamilyId if needed
+    final userDoc = await _firestore.collection('users').doc(memberId).get();
+    if (userDoc.exists) {
+      final updates = <String, dynamic>{
+        'familyIds': FieldValue.arrayRemove([familyId]),
+      };
+      if (userDoc.data()?['currentFamilyId'] == familyId) {
+        updates['currentFamilyId'] = null;
+      }
+      await _firestore.collection('users').doc(memberId).update(updates);
+    }
+
+    // Remove user's location data
+    await _database.ref('locations/$familyId/$memberId').remove();
   }
 
   /// Delete the current family (admin only)
@@ -638,20 +781,91 @@ class FamilyService {
               // Location not available
             }
 
+            String memberName = data['displayName'] ?? 'Unknown';
+            String? memberPhone = data['phone'] ?? data['phoneNumber'];
+            
+            // Fetch user profile from Firestore to get their real name and phone
+            try {
+              final userDoc = await _firestore.collection('users').doc(memberId).get();
+              if (userDoc.exists) {
+                final userData = userDoc.data()!;
+                final profileName = userData['displayName'] ?? userData['name'];
+                final profilePhone = userData['phone'] ?? userData['phoneNumber'];
+                
+                if (profilePhone != null && profilePhone.toString().isNotEmpty) {
+                  memberPhone = profilePhone;
+                }
+                
+                if (profileName != null) {
+                  memberName = profileName;
+                  if (memberId == currentUserId && profileName != (data['displayName'] ?? '')) {
+                    doc.reference.update({'displayName': profileName}).catchError((_) {});
+                  }
+                }
+              }
+            } catch (_) {}
+
             members.add(FamilyMemberData(
               id: memberId,
-              displayName: data['displayName'] ?? 'Unknown',
+              displayName: memberName,
               photoUrl: data['photoUrl'],
               role: data['role'] ?? 'member',
               isOnline: _isRecentlyActive(location?.timestamp),
               location: location,
               battery: location?.battery ?? 100,
               isCurrentUser: memberId == currentUserId,
+              phone: memberPhone,
             ));
           }
 
           return members;
         });
+  }
+
+  // ==========================================
+  // Geofence Methods
+  // ==========================================
+
+  /// Stream of geofences for a given family
+  Stream<List<GeofenceModel>> getGeofencesStream(String familyId) {
+    return _firestore
+        .collection('families')
+        .doc(familyId)
+        .collection('geofences')
+        .snapshots()
+        .map((snapshot) {
+      return snapshot.docs.map((doc) => GeofenceModel.fromFirestore(doc)).toList();
+    });
+  }
+
+  /// Add a new geofence
+  Future<void> addGeofence(GeofenceModel geofence) async {
+    await _firestore
+        .collection('families')
+        .doc(geofence.familyId)
+        .collection('geofences')
+        .doc(geofence.id)
+        .set(geofence.toJson());
+  }
+
+  /// Update an existing geofence
+  Future<void> updateGeofence(GeofenceModel geofence) async {
+    await _firestore
+        .collection('families')
+        .doc(geofence.familyId)
+        .collection('geofences')
+        .doc(geofence.id)
+        .update(geofence.toJson());
+  }
+
+  /// Delete a geofence
+  Future<void> deleteGeofence(String familyId, String geofenceId) async {
+    await _firestore
+        .collection('families')
+        .doc(familyId)
+        .collection('geofences')
+        .doc(geofenceId)
+        .delete();
   }
 
   /// Dispose
@@ -671,6 +885,7 @@ class FamilyMemberData {
   final LocationModel? location;
   final int battery;
   final bool isCurrentUser;
+  final String? phone;
 
   FamilyMemberData({
     required this.id,
@@ -681,6 +896,7 @@ class FamilyMemberData {
     this.location,
     this.battery = 100,
     this.isCurrentUser = false,
+    this.phone,
   });
 
   /// Alias for displayName for convenience

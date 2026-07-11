@@ -1,4 +1,4 @@
-# Family Circle (formerly FamilyNest)
+# Family Circle (formerly Flockar)
 
 A comprehensive family safety and location tracking application built with Flutter. Keep your loved ones safe, track their real-time location, and get notified in case of emergencies.
 

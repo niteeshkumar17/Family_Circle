@@ -6,8 +6,8 @@ import 'presentation/blocs/auth/auth_bloc.dart';
 import 'presentation/blocs/family/family_bloc.dart';
 import 'presentation/blocs/location/location_bloc.dart';
 
-class FamilyNestApp extends StatelessWidget {
-  const FamilyNestApp({super.key});
+class FlockarApp extends StatelessWidget {
+  const FlockarApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -18,7 +18,7 @@ class FamilyNestApp extends StatelessWidget {
         BlocProvider(create: (_) => LocationBloc()),
       ],
       child: MaterialApp(
-        title: 'FamilyNest',
+        title: 'Flockar',
         debugShowCheckedModeBanner: false,
         theme: AppTheme.lightTheme,
         darkTheme: AppTheme.darkTheme,

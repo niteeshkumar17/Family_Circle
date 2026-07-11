@@ -5,6 +5,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
+import '../data/models/notification_model.dart';
 
 /// Notification Service
 /// 
@@ -236,7 +237,7 @@ class NotificationService {
 
     // Show local notification
     _showLocalNotification(
-      title: notification.title ?? 'FamilyNest',
+      title: notification.title ?? 'Flockar',
       body: notification.body ?? '',
       channelId: channelId,
       importance: importance,
@@ -322,6 +323,18 @@ class NotificationService {
       importance: Importance.max,
       payload: 'sos:$eventId:$latitude:$longitude',
     );
+    
+    await _saveNotificationToFirestore(
+      NotificationModel(
+        id: '',
+        userId: FirebaseAuth.instance.currentUser?.uid ?? '',
+        type: NotificationType.sos,
+        title: '🚨 SOS EMERGENCY',
+        body: '$userName needs help!',
+        createdAt: DateTime.now(),
+        priority: NotificationPriority.urgent,
+      ),
+    );
   }
 
   /// Show geofence notification
@@ -337,6 +350,18 @@ class NotificationService {
       channelId: 'geofence_alerts',
       importance: Importance.high,
     );
+    
+    await _saveNotificationToFirestore(
+      NotificationModel(
+        id: '',
+        userId: FirebaseAuth.instance.currentUser?.uid ?? '',
+        type: isEntry ? NotificationType.geofenceEntry : NotificationType.geofenceExit,
+        title: isEntry ? '📍 Arrival' : '🚶 Departure',
+        body: '$userName $action $placeName',
+        createdAt: DateTime.now(),
+        priority: NotificationPriority.high,
+      ),
+    );
   }
 
   /// Show low battery notification
@@ -349,6 +374,18 @@ class NotificationService {
       body: '$userName\'s phone is at $batteryLevel%',
       channelId: 'system_alerts',
     );
+
+    await _saveNotificationToFirestore(
+      NotificationModel(
+        id: '',
+        userId: FirebaseAuth.instance.currentUser?.uid ?? '',
+        type: NotificationType.lowBattery,
+        title: '🔋 Low Battery Alert',
+        body: '$userName\'s phone is at $batteryLevel%',
+        createdAt: DateTime.now(),
+        priority: NotificationPriority.normal,
+      ),
+    );
   }
 
   /// Subscribe to family topic
@@ -359,6 +396,86 @@ class NotificationService {
   /// Unsubscribe from family topic
   Future<void> unsubscribeFromFamily(String familyId) async {
     await _fcm.unsubscribeFromTopic('family_$familyId');
+  }
+  
+  // --- FIRESTORE NOTIFICATION MANAGEMENT ---
+
+  /// Internal method to save a generated notification to Firestore
+  Future<void> _saveNotificationToFirestore(NotificationModel notification) async {
+    final userId = notification.userId;
+    if (userId.isEmpty) return;
+
+    try {
+      final docRef = FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId)
+          .collection('notifications')
+          .doc();
+          
+      final newNotif = notification.copyWith(id: docRef.id);
+      await docRef.set(newNotif.toJson());
+    } catch (e) {
+      debugPrint('Error saving notification: $e');
+    }
+  }
+
+  /// Get stream of user notifications
+  Stream<List<NotificationModel>> getUserNotifications() {
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    if (userId == null) return const Stream.empty();
+
+    return FirebaseFirestore.instance
+        .collection('users')
+        .doc(userId)
+        .collection('notifications')
+        .orderBy('createdAt', descending: true)
+        .limit(50)
+        .snapshots()
+        .map((snapshot) {
+      return snapshot.docs.map((doc) => NotificationModel.fromFirestore(doc)).toList();
+    });
+  }
+
+  /// Mark a specific notification as read
+  Future<void> markAsRead(String notificationId) async {
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    if (userId == null) return;
+
+    try {
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId)
+          .collection('notifications')
+          .doc(notificationId)
+          .update({'isRead': true});
+    } catch (e) {
+      debugPrint('Error marking notification as read: $e');
+    }
+  }
+
+  /// Mark all unread notifications as read
+  Future<void> markAllAsRead() async {
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    if (userId == null) return;
+
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId)
+          .collection('notifications')
+          .where('isRead', isEqualTo: false)
+          .get();
+
+      if (snapshot.docs.isEmpty) return;
+
+      final batch = FirebaseFirestore.instance.batch();
+      for (final doc in snapshot.docs) {
+        batch.update(doc.reference, {'isRead': true});
+      }
+      await batch.commit();
+    } catch (e) {
+      debugPrint('Error marking all notifications as read: $e');
+    }
   }
 
   /// Dispose
