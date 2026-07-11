@@ -7,7 +7,7 @@ class PrivacyPolicyScreen extends StatelessWidget {
   static const String _effectiveDate = 'July 11, 2026';
   static const String _appName = 'Flockar';
   static const String _companyName = 'Flockar Technologies';
-  static const String _contactEmail = 'privacy@flockar.niteeshkumar.online';
+  static const String _contactEmail = 'privacy@niteeshkumar.online';
 
   @override
   Widget build(BuildContext context) {

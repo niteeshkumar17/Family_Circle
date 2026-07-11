@@ -7,7 +7,7 @@ class TermsOfServiceScreen extends StatelessWidget {
   static const String _effectiveDate = 'July 11, 2026';
   static const String _appName = 'Flockar';
   static const String _companyName = 'Flockar Technologies';
-  static const String _contactEmail = 'legal@flockar.niteeshkumar.online';
+  static const String _contactEmail = 'legal@niteeshkumar.online';
 
   @override
   Widget build(BuildContext context) {

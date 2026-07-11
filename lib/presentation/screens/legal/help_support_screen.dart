@@ -6,7 +6,7 @@ class HelpSupportScreen extends StatelessWidget {
   const HelpSupportScreen({super.key});
 
   static const String _appName = 'Flockar';
-  static const String _supportEmail = 'support@flockar.niteeshkumar.online';
+  static const String _supportEmail = 'support@niteeshkumar.online';
   static const String _supportPhone = '1800-123-4567';
 
   @override
