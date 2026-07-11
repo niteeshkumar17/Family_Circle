@@ -99,7 +99,7 @@ class LocationService {
   Future<void> updateCurrentLocation() async {
     if (_userId == null || _familyId == null) return;
     try {
-      final position = await _location.getLocation();
+      final position = await _location.getLocation().timeout(const Duration(seconds: 7));
       await _onPositionUpdate(position);
     } catch (e) {
       debugPrint('Error manually updating location: $e');
@@ -140,7 +140,7 @@ class LocationService {
       final placemarks = await placemarkFromCoordinates(
         position.latitude!,
         position.longitude!,
-      );
+      ).timeout(const Duration(seconds: 5));
       if (placemarks.isNotEmpty) {
         final place = placemarks.first;
         address = _formatAddress(place);

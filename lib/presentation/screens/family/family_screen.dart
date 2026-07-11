@@ -504,14 +504,12 @@ class _RealFamilyScreenState extends State<RealFamilyScreen> {
 
     return RefreshIndicator(
       onRefresh: () async {
-        // Force update current user's location to show fresh online status, battery, address, etc.
-        try {
-          await _locationService.updateCurrentLocation();
-        } catch (e) {
+        // Trigger manual location update in the background (so the UI refresh is not blocked by slow GPS lock)
+        _locationService.updateCurrentLocation().catchError((e) {
           debugPrint('Error manually updating location: $e');
-        }
+        });
 
-        // Fetch latest family members locations and metadata
+        // Fetch latest family members locations and metadata from database
         final members = await _familyService.getFamilyMembers();
         if (mounted) {
           setState(() => _members = members);
