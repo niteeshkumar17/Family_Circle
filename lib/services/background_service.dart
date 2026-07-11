@@ -178,6 +178,13 @@ Future<void> onStart(ServiceInstance service) async {
     await configurePresenceOnDisconnect(userId);
   }
 
+  // Configure location settings in the isolate
+  await location.changeSettings(
+    accuracy: LocationAccuracy.high,
+    distanceFilter: 10,
+    interval: 15000,
+  );
+
   try {
     await location.enableBackgroundMode(enable: true);
   } catch (e) {
@@ -188,6 +195,115 @@ Future<void> onStart(ServiceInstance service) async {
 
   // Battery optimizer
   final batteryOptimizer = BatteryOptimizedTracker();
+
+  // Setup reactive location stream subscription
+  StreamSubscription<LocationData>? locationSubscription;
+
+  void startLocationListening() {
+    locationSubscription?.cancel();
+    locationSubscription = location.onLocationChanged.listen((position) async {
+      final now = DateTime.now();
+
+      // Skip if location sharing is disabled
+      if (!locationSharingEnabled || userId == null || familyId == null) {
+        return;
+      }
+
+      // Check if we should update based on tracking interval
+      if (lastUpdateTime != null) {
+        final elapsed = now.difference(lastUpdateTime!).inSeconds;
+        if (elapsed < trackingIntervalSeconds) {
+          return; // Not time yet (respect adaptive interval)
+        }
+      }
+
+      // Battery optimization skip check
+      bool skipPositionUpdate = !sosMode && batteryOptimizer.shouldSkipUpdate(position, lastPosition);
+
+      // Calculate optimal adaptive interval
+      if (!sosMode) {
+        trackingIntervalSeconds = batteryOptimizer.calculateOptimalInterval(
+          position.speed ?? 0,
+        );
+      }
+
+      try {
+        // Get battery info
+        final batteryLevel = await battery.batteryLevel;
+        final batteryState = await battery.batteryState;
+        final isCharging = batteryState == BatteryState.charging ||
+            batteryState == BatteryState.full;
+
+        // Get network status
+        final connectivityResult = await connectivity.checkConnectivity();
+        String networkStatus = 'offline';
+        if (connectivityResult.contains(ConnectivityResult.wifi)) {
+          networkStatus = 'wifi';
+        } else if (connectivityResult.contains(ConnectivityResult.mobile)) {
+          networkStatus = 'mobile';
+        }
+
+        final locationData = {
+          'latitude': skipPositionUpdate ? (lastPosition?.latitude ?? position.latitude) : position.latitude,
+          'longitude': skipPositionUpdate ? (lastPosition?.longitude ?? position.longitude) : position.longitude,
+          'accuracy': position.accuracy,
+          'altitude': position.altitude,
+          'speed': position.speed,
+          'heading': position.heading,
+          'battery': batteryLevel,
+          'isCharging': isCharging,
+          'networkStatus': networkStatus,
+          'timestamp': now.millisecondsSinceEpoch,
+          'isActive': true,
+        };
+
+        // Update Firebase Realtime Database
+        bool firebasePushSucceeded = false;
+        try {
+          await database
+              .ref('locations/$familyId/$userId')
+              .set(locationData);
+          firebasePushSucceeded = true;
+        } catch (pushError) {
+          try {
+            await LocationCacheService().cacheLocation(
+              userId: userId!,
+              familyId: familyId!,
+              locationData: locationData,
+            );
+          } catch (_) {}
+        }
+
+        // Update local state
+        lastPosition = position;
+        lastUpdateTime = now;
+
+        // Update notification info
+        if (service is AndroidServiceInstance) {
+          final pendingCount = firebasePushSucceeded
+              ? 0
+              : await LocationCacheService().getPendingCount();
+          final cacheInfo = pendingCount > 0 ? ' ($pendingCount cached)' : '';
+          service.setForegroundNotificationInfo(
+            title: 'FamilyNest',
+            content: sosMode
+                ? '🚨 SOS Mode - Tracking active'
+                : '📍 Location sharing active$cacheInfo',
+          );
+        }
+
+        // Invoke location update event to main app
+        service.invoke('locationUpdate', locationData);
+      } catch (e) {
+        if (kDebugMode) {
+          print('Location update failed in background stream: $e');
+        }
+      }
+    });
+  }
+
+  // Start listening to the stream
+  startLocationListening();
 
   // Handle service commands
   if (service is AndroidServiceInstance) {
@@ -201,6 +317,7 @@ Future<void> onStart(ServiceInstance service) async {
   }
 
   service.on('stopService').listen((event) async {
+    locationSubscription?.cancel();
     if (userId != null && userId!.isNotEmpty) {
       await database.ref('presence/$userId').set({
         'online': false,
@@ -261,133 +378,17 @@ Future<void> onStart(ServiceInstance service) async {
     trackingIntervalSeconds = AppConfig.locationUpdateIntervalSeconds;
   });
 
-  // Main location tracking loop
-  Timer.periodic(const Duration(seconds: 1), (timer) async {
-    // Check if we should update
-    final now = DateTime.now();
-    if (lastUpdateTime != null) {
-      final elapsed = now.difference(lastUpdateTime!).inSeconds;
-      if (elapsed < trackingIntervalSeconds) {
-        return; // Not time yet
-      }
-    }
-
-    // Skip if location sharing is disabled
-    if (!locationSharingEnabled || userId == null || familyId == null) {
-      return;
-    }
-
-    try {
-      // Get current position
-      final position = await location.getLocation();
-
-      // Check if we should skip this update (battery optimization)
-      bool skipPositionUpdate = !sosMode && batteryOptimizer.shouldSkipUpdate(position, lastPosition);
-      // We no longer `return;` here because we STILL need to update the timestamp
-      // on Firebase so other devices know the user is active at this location!
-
-      // Calculate adaptive interval
-      if (!sosMode) {
-        trackingIntervalSeconds = batteryOptimizer.calculateOptimalInterval(
-          position.speed ?? 0,
-        );
-      }
-
-      // Get battery info
-      final batteryLevel = await battery.batteryLevel;
-      final batteryState = await battery.batteryState;
-      final isCharging = batteryState == BatteryState.charging ||
-          batteryState == BatteryState.full;
-
-      // Get network status
-      final connectivityResult = await connectivity.checkConnectivity();
-      String networkStatus = 'offline';
-      if (connectivityResult.contains(ConnectivityResult.wifi)) {
-        networkStatus = 'wifi';
-      } else if (connectivityResult.contains(ConnectivityResult.mobile)) {
-        networkStatus = 'mobile';
-      }
-
-      // Prepare location data
-      final locationData = {
-        'latitude': skipPositionUpdate ? (lastPosition?.latitude ?? position.latitude) : position.latitude,
-        'longitude': skipPositionUpdate ? (lastPosition?.longitude ?? position.longitude) : position.longitude,
-        'accuracy': position.accuracy,
-        'altitude': position.altitude,
-        'speed': position.speed,
-        'heading': position.heading,
-        'battery': batteryLevel,
-        'isCharging': isCharging,
-        'networkStatus': networkStatus,
-        'timestamp': now.millisecondsSinceEpoch,
-        'isActive': true,
-      };
-
-      // Update Firebase Realtime Database (with offline cache fallback)
-      bool firebasePushSucceeded = false;
-      try {
-        await database
-            .ref('locations/$familyId/$userId')
-            .set(locationData);
-        firebasePushSucceeded = true;
-      } catch (pushError) {
-        // Firebase unreachable — cache locally for later upload
-        if (kDebugMode) {
-          print('Firebase push failed, caching locally: $pushError');
-        }
-        try {
-          await LocationCacheService().cacheLocation(
-            userId: userId!,
-            familyId: familyId!,
-            locationData: locationData,
-          );
-        } catch (cacheError) {
-          if (kDebugMode) {
-            print('Local cache also failed: $cacheError');
-          }
-        }
-      }
-
-      // Update state
-      lastPosition = position;
-      lastUpdateTime = now;
-
-      // Update notification
-      if (service is AndroidServiceInstance) {
-        final pendingCount = firebasePushSucceeded
-            ? 0
-            : await LocationCacheService().getPendingCount();
-        final cacheInfo = pendingCount > 0 ? ' ($pendingCount cached)' : '';
-        service.setForegroundNotificationInfo(
-          title: 'FamilyNest',
-          content: sosMode
-              ? '🚨 SOS Mode - Tracking every ${trackingIntervalSeconds}s'
-              : '📍 Location sharing active$cacheInfo',
-        );
-      }
-
-      // Send update to main app
-      service.invoke('locationUpdate', locationData);
-
-      // Log for debugging
-      if (kDebugMode) {
-        print('Location updated: ${position.latitude}, ${position.longitude}');
-      }
-    } catch (e) {
-      if (kDebugMode) {
-        print('Location update failed: $e');
-      }
-    }
-  });
-
-  // Presence heartbeat - update every minute
+  // Presence heartbeat & keep-alive location update - updates every minute
   Timer.periodic(const Duration(minutes: 1), (timer) async {
     if (userId == null || userId!.isEmpty) return;
     
+    final now = DateTime.now();
+
+    // 1. Update presence heartbeat
     try {
       await database.ref('presence/$userId').set({
         'online': true,
-        'lastSeen': DateTime.now().millisecondsSinceEpoch,
+        'lastSeen': now.millisecondsSinceEpoch,
         'appState': 'background',
       });
 
@@ -395,6 +396,49 @@ Future<void> onStart(ServiceInstance service) async {
     } catch (e) {
       if (kDebugMode) {
         print('Presence update failed: $e');
+      }
+    }
+
+    // 2. Keep-alive location update (forces location scan & push if no updates for 4 minutes)
+    if (locationSharingEnabled && familyId != null) {
+      if (lastUpdateTime == null || now.difference(lastUpdateTime!).inMinutes >= 4) {
+        try {
+          final position = await location.getLocation().timeout(const Duration(seconds: 10));
+          
+          final batteryLevel = await battery.batteryLevel;
+          final batteryState = await battery.batteryState;
+          final isCharging = batteryState == BatteryState.charging ||
+              batteryState == BatteryState.full;
+
+          final connectivityResult = await connectivity.checkConnectivity();
+          String networkStatus = 'offline';
+          if (connectivityResult.contains(ConnectivityResult.wifi)) {
+            networkStatus = 'wifi';
+          } else if (connectivityResult.contains(ConnectivityResult.mobile)) {
+            networkStatus = 'mobile';
+          }
+
+          final locationData = {
+            'latitude': position.latitude,
+            'longitude': position.longitude,
+            'accuracy': position.accuracy,
+            'altitude': position.altitude,
+            'speed': position.speed,
+            'heading': position.heading,
+            'battery': batteryLevel,
+            'isCharging': isCharging,
+            'networkStatus': networkStatus,
+            'timestamp': now.millisecondsSinceEpoch,
+            'isActive': true,
+          };
+
+          await database
+              .ref('locations/$familyId/$userId')
+              .set(locationData);
+
+          lastPosition = position;
+          lastUpdateTime = now;
+        } catch (_) {}
       }
     }
   });
