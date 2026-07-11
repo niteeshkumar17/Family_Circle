@@ -157,7 +157,7 @@ Future<void> onStart(ServiceInstance service) async {
       }
     } catch (e) {
       if (!e.toString().contains('duplicate-app') && !e.toString().contains('already exists')) {
-        debugPrint('BG Service Firebase Init Error: $e');
+        print('BG Service Firebase Init Error: $e');
       }
     }
 
