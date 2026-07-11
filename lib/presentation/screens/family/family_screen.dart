@@ -727,41 +727,6 @@ class _RealFamilyScreenState extends State<RealFamilyScreen> {
                 ),
               ),
             ),
-            const SizedBox(width: 4),
-            // Direction Icon
-            GestureDetector(
-              onTap: () {
-                if (member.location != null) {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => MemberDetailScreen(
-                        memberId: member.id,
-                        memberName: member.displayName,
-                        status: member.statusText,
-                        battery: member.battery,
-                        lat: member.location?.latitude ?? 0,
-                        lng: member.location?.longitude ?? 0,
-                        speed: member.location?.speed ?? 0,
-                        isMoving: member.isMoving,
-                      ),
-                    ),
-                  );
-                }
-              },
-              child: Container(
-                padding: const EdgeInsets.all(6),
-                decoration: BoxDecoration(
-                  color: AppTheme.primaryColor.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: const Icon(
-                  Icons.directions_rounded,
-                  color: AppTheme.primaryColor,
-                  size: 18,
-                ),
-              ),
-            ),
           ],
         ),
       ),
