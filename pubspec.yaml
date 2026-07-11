@@ -68,7 +68,7 @@ dependencies:
   json_annotation: ^4.8.1
 
   # Google Sign-In
-  google_sign_in: ^6.1.5
+  google_sign_in: 6.2.1
 
   # Battery Info
   battery_plus: ^6.0.0
@@ -95,10 +95,7 @@ flutter_icons:
     generate: true
     image_path: "assets/icons/app_icon.jpg"
     background_color: "#FFFFFF"
-    theme_color: "#6366F1"
-
-dependency_overrides:
-  google_sign_in_android: 6.1.18
+# Remove overrides
 
 flutter:
   uses-material-design: true
