@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Help Center &amp; FAQ — Flockar</title>
+    <link rel="icon" type="image/jpeg" href="assets/logo.jpg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        .help-container {
+            max-width: 800px;
+            margin: 140px auto 100px;
+            padding: 0 24px;
+        }
+        .help-header {
+            margin-bottom: 48px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 32px;
+            text-align: center;
+        }
+        .help-title {
+            font-size: 2.5rem;
+            font-weight: 700;
+            letter-spacing: -0.03em;
+            margin-bottom: 16px;
+        }
+        .help-subtitle {
+            color: var(--text-2);
+            font-size: 1.1rem;
+        }
+        .faq-section {
+            margin-bottom: 32px;
+        }
+        .faq-section h2 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--purple);
+            margin-bottom: 16px;
+            letter-spacing: -0.01em;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 8px;
+        }
+        .faq-item {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            margin-bottom: 12px;
+            overflow: hidden;
+            transition: all 0.25s var(--ease);
+        }
+        .faq-item:hover {
+            border-color: var(--border-2);
+        }
+        .faq-question {
+            padding: 20px;
+            font-weight: 500;
+            font-size: 0.95rem;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            user-select: none;
+        }
+        .faq-answer {
+            padding: 0 20px;
+            max-height: 0;
+            overflow: hidden;
+            transition: all 0.25s var(--ease);
+            color: var(--text-2);
+            font-size: 0.9rem;
+            line-height: 1.6;
+        }
+        .faq-item.active .faq-answer {
+            padding-bottom: 20px;
+            max-height: 500px;
+        }
+        .faq-arrow {
+            transition: transform 0.25s var(--ease);
+            color: var(--text-3);
+        }
+        .faq-item.active .faq-arrow {
+            transform: rotate(180deg);
+            color: var(--purple);
+        }
+        .contact-box {
+            background: var(--bg-card);
+            border: 1px solid var(--border-2);
+            border-radius: 16px;
+            padding: 32px;
+            text-align: center;
+            margin-top: 64px;
+        }
+        .contact-box h3 {
+            font-size: 1.2rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        .contact-box p {
+            font-size: 0.9rem;
+            color: var(--text-2);
+            margin-bottom: 24px;
+        }
+        .contact-btn {
+            display: inline-block;
+            background: var(--text);
+            color: var(--bg);
+            padding: 10px 24px;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 0.9rem;
+            transition: opacity 0.2s;
+        }
+        .contact-btn:hover {
+            opacity: 0.9;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- NAV -->
+    <nav id="navbar">
+        <div class="nav-wrap">
+            <a href="index.html" class="brand">
+                <img src="assets/logo.jpg" alt="Flockar" class="brand-img"> Flockar
+            </a>
+            <div class="nav-center">
+                <a href="index.html#features">Features</a>
+                <a href="index.html#how">How it works</a>
+                <a href="index.html#download">Download</a>
+            </div>
+            <a href="index.html#download" class="nav-btn">Get the app</a>
+        </div>
+    </nav>
+
+    <!-- CONTENT -->
+    <div class="help-container">
+        <div class="help-header">
+            <h1 class="help-title">Help Center</h1>
+            <p class="help-subtitle">Find answers to frequently asked questions about Flockar.</p>
+        </div>
+
+        <!-- FAQs -->
+        <div class="faq-section">
+            <h2>Getting Started</h2>
+            
+            <div class="faq-item">
+                <div class="faq-question">
+                    <span>What is a "Nest" in Flockar?</span>
+                    <span class="faq-arrow">▼</span>
+                </div>
+                <div class="faq-answer">
+                    A Nest is a private, invite-only group of family members or friends. Once you join a Nest, you can see the location of other members of that specific Nest and share your own location with them. You can create or belong to multiple Nests at once.
+                </div>
+            </div>
+
+            <div class="faq-item">
+                <div class="faq-question">
+                    <span>How do I invite someone to join my Nest?</span>
+                    <span class="faq-arrow">▼</span>
+                </div>
+                <div class="faq-answer">
+                    Tap the "+" button or go to the Nest settings in the app to find your unique 6-digit invite code. Share this code with your family member. They can enter it in their Flockar app to join your Nest immediately.
+                </div>
+            </div>
+        </div>
+
+        <div class="faq-section">
+            <h2>Location &amp; Battery</h2>
+            
+            <div class="faq-item">
+                <div class="faq-question">
+                    <span>Why does Flockar need background location access?</span>
+                    <span class="faq-arrow">▼</span>
+                </div>
+                <div class="faq-answer">
+                    To keep your family updated on your safety and trigger geofence notifications, Flockar needs to access your location even when the app is closed or not actively in use. This permission can be managed in your phone's system settings.
+                </div>
+            </div>
+
+            <div class="faq-item">
+                <div class="faq-question">
+                    <span>Does background location tracking drain my battery?</span>
+                    <span class="faq-arrow">▼</span>
+                </div>
+                <div class="faq-answer">
+                    Flockar is built with advanced battery-optimisation technology. We use a combination of cell towers, Wi-Fi, and motion sensors to update location efficiently, only using high-power GPS when actively moving.
+                </div>
+            </div>
+        </div>
+
+        <div class="faq-section">
+            <h2>Safety &amp; SOS</h2>
+            
+            <div class="faq-item">
+                <div class="faq-question">
+                    <span>How does the one-tap SOS feature work?</span>
+                    <span class="faq-arrow">▼</span>
+                </div>
+                <div class="faq-answer">
+                    Tapping the SOS button will trigger a 3-second countdown. If not cancelled, it immediately broadcasts an emergency notification to all members of all your Nests with your exact high-accuracy location.
+                </div>
+            </div>
+
+            <div class="faq-item">
+                <div class="faq-question">
+                    <span>Is Flockar a replacement for calling emergency services?</span>
+                    <span class="faq-arrow">▼</span>
+                </div>
+                <div class="faq-answer">
+                    No. Flockar is a family convenience tool. We do not guarantee delivery of SOS notifications because they rely on mobile network coverage, battery status, and device settings. In an emergency, always call local emergency services (like 911) first.
+                </div>
+            </div>
+        </div>
+
+        <!-- Support Team contact info -->
+        <div class="contact-box">
+            <h3>Still need help?</h3>
+            <p>Our dedicated support team is available to assist you with any questions or technical issues.</p>
+            <a href="mailto:support@flockar.niteeshkumar.online" class="contact-btn">Email Support Team</a>
+        </div>
+    </div>
+
+    <!-- FOOTER -->
+    <footer>
+        <div class="content-wrap">
+            <div class="footer-inner">
+                <div class="footer-left">
+                    <a href="index.html" class="brand">
+                        <img src="assets/logo.jpg" alt="Flockar" class="brand-img"> Flockar
+                    </a>
+                    <p>The modern family safety app. Built with privacy and simplicity in mind.</p>
+                </div>
+                <div class="footer-cols">
+                    <div>
+                        <strong>Product</strong>
+                        <a href="index.html#features">Features</a>
+                        <a href="index.html#how">How it works</a>
+                        <a href="index.html#download">Download</a>
+                    </div>
+                    <div>
+                        <strong>Legal</strong>
+                        <a href="privacy.html">Privacy Policy</a>
+                        <a href="terms.html">Terms of Service</a>
+                    </div>
+                    <div>
+                        <strong>Support</strong>
+                        <a href="help.html">Help Center</a>
+                        <a href="mailto:support@flockar.niteeshkumar.online">Contact Us</a>
+                    </div>
+                </div>
+            </div>
+            <div class="footer-bar">
+                <p>&copy; 2026 Flockar Technologies. All rights reserved.</p>
+                <p>Designed with ❤️ for families.</p>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        // FAQ Accordion script
+        document.querySelectorAll('.faq-question').forEach(q => {
+            q.addEventListener('click', () => {
+                const item = q.parentElement;
+                const isActive = item.classList.contains('active');
+                
+                // Close all items
+                document.querySelectorAll('.faq-item').forEach(i => i.classList.remove('active'));
+                
+                // Toggle current
+                if (!isActive) {
+                    item.classList.add('active');
+                }
+            });
+        });
+    </script>
+</body>
+</html>
