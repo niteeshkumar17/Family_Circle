@@ -26,9 +26,11 @@ void main() async {
 
   // Initialize Firebase
   try {
-    await Firebase.initializeApp(
-      options: DefaultFirebaseOptions.currentPlatform,
-    );
+    if (Firebase.apps.isEmpty) {
+      await Firebase.initializeApp(
+        options: DefaultFirebaseOptions.currentPlatform,
+      );
+    }
   } catch (e, st) {
     debugPrint('Firebase initialization failed: $e');
     debugPrintStack(stackTrace: st);
