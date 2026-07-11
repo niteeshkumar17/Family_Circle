@@ -68,7 +68,7 @@ dependencies:
   json_annotation: ^4.8.1
 
   # Google Sign-In
-  google_sign_in: ^6.1.6  # Downgraded to avoid PigeonUserDetails bug
+  google_sign_in: 6.1.5  # Pinned to avoid PigeonUserDetails type cast bug
 
   # Battery Info
   battery_plus: ^6.0.0
