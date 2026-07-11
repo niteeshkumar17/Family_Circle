@@ -125,20 +125,16 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildBody() {
-    switch (_currentIndex) {
-      case 0:
-        return const MapViewContent();
-      case 1:
-        return const RealFamilyScreen();
-      case 2:
-        return const SizedBox(); // SOS is handled by FAB
-      case 3:
-        return const PlacesContent();
-      case 4:
-        return const SettingsContent();
-      default:
-        return const MapViewContent();
-    }
+    return IndexedStack(
+      index: _currentIndex,
+      children: const [
+        MapViewContent(),
+        RealFamilyScreen(),
+        SizedBox(), // SOS placeholder
+        PlacesContent(),
+        SettingsContent(),
+      ],
+    );
   }
 
   Widget _buildBottomNav() {
