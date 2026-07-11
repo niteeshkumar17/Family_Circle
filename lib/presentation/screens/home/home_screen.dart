@@ -5,6 +5,8 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:location/location.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import '../../../config/theme_config.dart';
 import '../../../config/routes.dart';
 import '../../../services/family_service.dart';
@@ -1159,59 +1161,152 @@ class _SettingsContentState extends State<SettingsContent> {
   bool _notificationsEnabled = true;
   bool _locationSharingEnabled = true;
 
-  void _showProfileDialog() {
-    final nameController = TextEditingController(text: 'User');
-    final phoneController = TextEditingController(text: '+91 98765 43210');
+  void _showProfileDialog() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    // Show loading dialog
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const Center(
+        child: CircularProgressIndicator(color: AppTheme.primaryColor),
+      ),
+    );
+
+    String name = 'User';
+    String phone = '';
+
+    try {
+      final userDoc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+      if (userDoc.exists) {
+        name = userDoc.data()?['displayName'] ?? userDoc.data()?['name'] ?? user.displayName ?? 'User';
+        phone = userDoc.data()?['phone'] ?? userDoc.data()?['phoneNumber'] ?? '';
+      } else {
+        name = user.displayName ?? 'User';
+      }
+    } catch (e) {
+      debugPrint('Error fetching profile: $e');
+    }
+
+    if (!mounted) return;
+    Navigator.pop(context); // Close loading dialog
+
+    final nameController = TextEditingController(text: name);
+    final phoneController = TextEditingController(text: phone);
+    bool isSaving = false;
     
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Edit Profile'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const CircleAvatar(
-              radius: 40,
-              backgroundColor: AppTheme.primaryColor,
-              child: Icon(Icons.person, size: 40, color: Colors.white),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: nameController,
-              decoration: const InputDecoration(
-                labelText: 'Display Name',
-                prefixIcon: Icon(Icons.person_outline),
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: const Text('Edit Profile'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const CircleAvatar(
+                radius: 40,
+                backgroundColor: AppTheme.primaryColor,
+                child: Icon(Icons.person, size: 40, color: Colors.white),
               ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: phoneController,
-              decoration: const InputDecoration(
-                labelText: 'Phone Number',
-                prefixIcon: Icon(Icons.phone_outlined),
+              const SizedBox(height: 16),
+              TextField(
+                controller: nameController,
+                decoration: const InputDecoration(
+                  labelText: 'Display Name',
+                  prefixIcon: Icon(Icons.person_outline),
+                ),
+                enabled: !isSaving,
               ),
-              keyboardType: TextInputType.phone,
+              const SizedBox(height: 12),
+              TextField(
+                controller: phoneController,
+                decoration: const InputDecoration(
+                  labelText: 'Phone Number',
+                  prefixIcon: Icon(Icons.phone_outlined),
+                ),
+                keyboardType: TextInputType.phone,
+                enabled: !isSaving,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: isSaving ? null : () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: isSaving ? null : () async {
+                final newName = nameController.text.trim();
+                final newPhone = phoneController.text.trim();
+                if (newName.isEmpty) return;
+
+                setDialogState(() => isSaving = true);
+                
+                final messenger = ScaffoldMessenger.of(context);
+                final navigator = Navigator.of(dialogContext);
+
+                try {
+                  // 1. Update user document in Firestore
+                  final userRef = FirebaseFirestore.instance.collection('users').doc(user.uid);
+                  final userDoc = await userRef.get();
+                  
+                  await userRef.set({
+                    'displayName': newName,
+                    'name': newName,
+                    'phone': newPhone,
+                    'phoneNumber': newPhone,
+                  }, SetOptions(merge: true));
+
+                  // 2. Update display name in Firebase Auth
+                  try {
+                    await user.updateDisplayName(newName);
+                    await user.reload();
+                  } catch (_) {}
+
+                  // 3. Update display name in all members collections of user's families
+                  if (userDoc.exists) {
+                    final familyIds = List<String>.from(userDoc.data()?['familyIds'] ?? []);
+                    for (final familyId in familyIds) {
+                      try {
+                        await FirebaseFirestore.instance
+                            .collection('families')
+                            .doc(familyId)
+                            .collection('members')
+                            .doc(user.uid)
+                            .update({'displayName': newName});
+                      } catch (_) {}
+                    }
+                  }
+
+                  navigator.pop();
+                  messenger.showSnackBar(
+                    const SnackBar(
+                      content: Text('Profile updated successfully'),
+                      backgroundColor: AppTheme.successColor,
+                    ),
+                  );
+                } catch (e) {
+                  messenger.showSnackBar(
+                    SnackBar(
+                      content: Text('Error saving profile: $e'),
+                      backgroundColor: AppTheme.errorColor,
+                    ),
+                  );
+                } finally {
+                  setDialogState(() => isSaving = false);
+                }
+              },
+              child: isSaving
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                    )
+                  : const Text('Save'),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(context);
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Profile updated successfully'),
-                  backgroundColor: AppTheme.successColor,
-                ),
-              );
-            },
-            child: const Text('Save'),
-          ),
-        ],
       ),
     );
   }
