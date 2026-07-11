@@ -464,7 +464,6 @@ Future<bool> onIosBackground(ServiceInstance service) async {
 /// Battery-optimized tracking strategy
 class BatteryOptimizedTracker {
   double _lastSpeed = 0;
-  int _stationaryCount = 0;
   LocationData? _lastSignificantPosition;
 
   /// Calculate optimal tracking interval based on speed
@@ -472,16 +471,9 @@ class BatteryOptimizedTracker {
     _lastSpeed = currentSpeed;
 
     if (currentSpeed < AppConfig.movementThresholdMps) {
-      // Stationary - increase interval progressively
-      _stationaryCount++;
-      if (_stationaryCount > 10) {
-        return AppConfig.stationaryIntervalSeconds * 2; // 4 minutes
-      }
-      return AppConfig.stationaryIntervalSeconds; // 2 minutes
+      // Stationary - update at stationary interval (60 seconds)
+      return AppConfig.stationaryIntervalSeconds;
     }
-
-    // Reset stationary count when moving
-    _stationaryCount = 0;
 
     if (currentSpeed < 2) {
       // Walking (< 7.2 km/h)

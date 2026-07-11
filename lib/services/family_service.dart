@@ -303,10 +303,10 @@ class FamilyService {
         });
   }
 
-  /// Check if timestamp is recent (within 10 minutes to accommodate stationary background intervals and clock differences)
+  /// Check if timestamp is recent (within 5 minutes)
   bool _isRecentlyActive(DateTime? timestamp) {
     if (timestamp == null) return false;
-    return DateTime.now().difference(timestamp).inMinutes.abs() < 10;
+    return DateTime.now().difference(timestamp).inMinutes.abs() < 5;
   }
 
   /// Get family members once

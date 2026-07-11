@@ -5,7 +5,7 @@ class AppConfig {
   
   // Location settings
   static const int locationUpdateIntervalSeconds = 15;
-  static const int stationaryIntervalSeconds = 120;
+  static const int stationaryIntervalSeconds = 60;
   static const int walkingIntervalSeconds = 30;
   static const int drivingIntervalSeconds = 10;
   static const double movementThresholdMps = 0.5;
