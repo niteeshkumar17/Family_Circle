@@ -324,6 +324,25 @@ class FamilyService {
     for (final doc in snapshot.docs) {
       final data = doc.data();
       final memberId = doc.id;
+      final isCurrent = memberId == currentUserId;
+      
+      String memberName = data['displayName'] ?? 'Unknown';
+      
+      // Fetch user profile from Firestore to get their real name (from 'name' or 'displayName')
+      try {
+        final userDoc = await _firestore.collection('users').doc(memberId).get();
+        if (userDoc.exists) {
+          final profileName = userDoc.data()?['displayName'] ?? userDoc.data()?['name'];
+          if (profileName != null) {
+            memberName = profileName;
+            
+            // Self-healing: if this is the current user, ensure family member name matches profile name
+            if (isCurrent && profileName != (data['displayName'] ?? '')) {
+              doc.reference.update({'displayName': profileName}).catchError((_) {});
+            }
+          }
+        }
+      } catch (_) {}
       
       // Get real-time location from Realtime Database
       LocationModel? location;
@@ -342,13 +361,13 @@ class FamilyService {
 
       members.add(FamilyMemberData(
         id: memberId,
-        displayName: data['displayName'] ?? 'Unknown',
+        displayName: memberName,
         photoUrl: data['photoUrl'],
         role: data['role'] ?? 'member',
         isOnline: _isRecentlyActive(location?.timestamp),
         location: location,
         battery: location?.battery ?? 100,
-        isCurrentUser: memberId == currentUserId,
+        isCurrentUser: isCurrent,
       ));
     }
 

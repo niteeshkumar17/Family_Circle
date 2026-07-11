@@ -4,6 +4,7 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:geocoding/geocoding.dart' hide Location;
 import 'package:battery_plus/battery_plus.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:flutter/foundation.dart';
 import '../data/models/location_model.dart';
 import '../data/models/geofence_model.dart';
 import 'dart:math' as math;
@@ -92,6 +93,17 @@ class LocationService {
   void stopTracking() {
     _positionSubscription?.cancel();
     _positionSubscription = null;
+  }
+
+  /// Force a manual location update (queries GPS and updates Firebase)
+  Future<void> updateCurrentLocation() async {
+    if (_userId == null || _familyId == null) return;
+    try {
+      final position = await _location.getLocation();
+      await _onPositionUpdate(position);
+    } catch (e) {
+      debugPrint('Error manually updating location: $e');
+    }
   }
 
   /// Handle position updates
