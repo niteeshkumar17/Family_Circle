@@ -353,7 +353,7 @@ class _RealFamilyScreenState extends State<RealFamilyScreen> {
           ElevatedButton.icon(
             onPressed: () {
               if (inviteCode != null) {
-                Share.share('Join my Flockar circle with code: $inviteCode\n\nDownload Flockar app to stay connected with family.');
+                Share.share('You\'re invited to join my secure Nest on Flockar! 🛡️\n\nTo join, enter this invite code in the app: $inviteCode\n\nDownload the app here: https://flockar.niteeshkumar.online', subject: 'Join my Nest on Flockar');
               }
               Navigator.pop(context);
             },

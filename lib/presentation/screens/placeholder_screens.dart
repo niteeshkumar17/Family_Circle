@@ -300,7 +300,7 @@ class FamilyScreen extends StatelessWidget {
           ),
           ElevatedButton.icon(
             onPressed: () {
-              Share.share('Join my Flockar circle with code: FAM-9283');
+              Share.share('You\'re invited to join my secure Nest on Flockar! 🛡️\n\nTo join, enter this invite code in the app: FAM-9283\n\nDownload the app here: https://flockar.niteeshkumar.online', subject: 'Join my Nest on Flockar');
               Navigator.pop(context);
             },
             icon: const Icon(Icons.share),
