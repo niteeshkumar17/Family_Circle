@@ -87,8 +87,50 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
 
         case 2:
           // Request to ignore battery optimizations
-          final status = await Permission.ignoreBatteryOptimizations.request();
-          granted = status.isGranted;
+          await Permission.ignoreBatteryOptimizations.request();
+          
+          if (mounted) {
+            // Show custom instruction dialog for manufacturer power settings
+            await showDialog(
+              context: context,
+              barrierDismissible: false,
+              builder: (context) => AlertDialog(
+                backgroundColor: const Color(0xFF1E1E1E),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                title: const Row(
+                  children: [
+                    Icon(Icons.battery_alert_rounded, color: Color(0xFFFFE66D)),
+                    SizedBox(width: 8),
+                    Text(
+                      'Battery Settings',
+                      style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
+                content: const Text(
+                  'To keep location tracking active when the app is closed, please tap "Battery saver" or "Battery" in the settings screen that opens next and select "No restrictions" or "Unrestricted".',
+                  style: TextStyle(color: Colors.white70, fontSize: 14),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () {
+                      Navigator.pop(context);
+                    },
+                    child: const Text(
+                      'Got it, Open Settings',
+                      style: TextStyle(color: Color(0xFFFFE66D), fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ],
+              ),
+            );
+
+            // Open the app settings page directly for the user
+            await openAppSettings();
+          }
+          granted = true; // Mark as done to allow flow completion
           break;
       }
 
