@@ -395,7 +395,7 @@ img { display: block; max-width: 100%; }
     background: #1e1e24; /* Dark navbar background */
     display: flex;
     align-items: center;
-    justify-content: space-around;
+    justify-content: space-evenly;
     padding-bottom: 8px; /* Safe area padding */
     z-index: 5;
     border-top: 1px solid rgba(255,255,255,0.05);
@@ -409,6 +409,7 @@ img { display: block; max-width: 100%; }
     color: rgba(255,255,255,0.4);
     font-size: 0.65rem;
     font-weight: 500;
+    width: 48px; /* Fixed width for equal horizontal spacing */
 }
 
 .nav-item.active {
@@ -421,7 +422,8 @@ img { display: block; max-width: 100%; }
 
 .sos-center {
     position: relative;
-    top: -24px;
+    top: -32px;
+    width: 58px;
 }
 
 .sos-btn {
