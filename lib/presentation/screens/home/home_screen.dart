@@ -27,6 +27,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   int _currentIndex = 0;
   bool _isBackgroundLocationRestricted = false;
+  Key _nestKey = UniqueKey();
 
   @override
   void initState() {
@@ -225,6 +226,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Widget _buildBody() {
     return IndexedStack(
+      key: _nestKey,
       index: _currentIndex,
       children: const [
         MapViewContent(),
@@ -408,6 +410,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                           try {
                             await FamilyService().switchFamily(family.id);
                             if (mounted) {
+                              setState(() {
+                                _nestKey = UniqueKey();
+                              });
                               ScaffoldMessenger.of(context).showSnackBar(
                                 SnackBar(content: Text('Switched to ${family.familyName}'), backgroundColor: AppTheme.primaryColor),
                               );
