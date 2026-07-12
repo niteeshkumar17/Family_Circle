@@ -815,19 +815,63 @@ footer {
     .feat-grid { grid-template-columns: 1fr 1fr; }
     .feat-large { grid-column: span 1; }
 
-    .steps { flex-direction: column; }
-    .step-line { width: 80%; height: 1px; }
+    .steps { flex-direction: column; gap: 20px; }
+    .step-line { width: 2px; height: 40px; margin: 10px 0; }
 
-    .footer-inner { grid-template-columns: 1fr; }
-    .footer-bar { flex-direction: column; gap: 8px; }
+    .footer-inner { grid-template-columns: 1fr; gap: 40px; }
+    .footer-bar { flex-direction: column; gap: 12px; align-items: center; text-align: center; }
+}
+
+@media (max-width: 768px) {
+    .hero {
+        padding: 100px 20px 60px;
+    }
+    
+    .hero h1 {
+        font-size: clamp(2.5rem, 8vw, 4rem);
+    }
+    
+    /* Stack hero cards vertically on mobile to prevent overflow */
+    .hero-cards {
+        flex-direction: column;
+        gap: 30px;
+        margin-top: 40px;
+    }
+    
+    .hcard-left {
+        margin: 0;
+        align-self: center;
+    }
+    
+    .hcard-stack {
+        margin: 0;
+        align-items: center;
+        gap: 20px;
+    }
+    
+    .hcard-sos {
+        margin: 0;
+    }
+    
+    .phone {
+        transform: scale(0.95);
+    }
 }
 
 @media (max-width: 600px) {
     #navbar { top: 10px; width: calc(100% - 24px); }
     .feat-grid { grid-template-columns: 1fr; }
-    .hero-cards { gap: 12px; }
-    .phone { width: 180px; height: 340px; }
-    .hcard { min-width: 120px; }
-    .footer-cols { flex-direction: column; gap: 32px; }
-    .cta-box { padding: 48px 20px; }
+    .footer-cols { flex-direction: column; gap: 32px; text-align: center; }
+    .footer-cols div { align-items: center; }
+    .cta-box { padding: 40px 20px; }
+    
+    .store-btns {
+        flex-direction: column;
+        align-items: center;
+    }
+    .store-btn {
+        width: 100%;
+        max-width: 280px;
+        justify-content: center;
+    }
 }
