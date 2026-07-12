@@ -388,23 +388,54 @@ img { display: block; max-width: 100%; }
     box-shadow: 0 4px 12px rgba(0,0,0,0.2);
 }
 
-.mockup-ui-bottom {
+.mockup-nav {
     position: absolute;
-    bottom: 24px; left: 16px; right: 16px;
+    bottom: 0; left: 0; right: 0;
+    height: 70px;
+    background: #1e1e24; /* Dark navbar background */
     display: flex;
-    gap: 10px;
-    z-index: 3;
+    align-items: center;
+    justify-content: space-around;
+    padding-bottom: 8px; /* Safe area padding */
+    z-index: 5;
+    border-top: 1px solid rgba(255,255,255,0.05);
 }
 
-.mockup-card {
-    flex: 1;
-    height: 70px;
-    background: rgba(30, 30, 35, 0.8);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 16px;
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+.nav-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    color: rgba(255,255,255,0.4);
+    font-size: 0.65rem;
+    font-weight: 500;
+}
+
+.nav-item.active {
+    color: var(--purple);
+}
+
+.nav-item svg {
+    width: 22px; height: 22px;
+}
+
+.sos-center {
+    position: relative;
+    top: -24px;
+}
+
+.sos-btn {
+    width: 58px; height: 58px;
+    background: #ff5252;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-weight: 700;
+    font-size: 1rem;
+    box-shadow: 0 4px 16px rgba(255, 82, 82, 0.4);
+    border: 6px solid #090b10; /* Creates the seamless cutout illusion against the map background */
 }
 
 .hcard {
