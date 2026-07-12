@@ -375,32 +375,7 @@ img { display: block; max-width: 100%; }
     animation: floatA 5s 3s ease-in-out infinite;
 }
 
-/* ── TICKER ───────────────────────────────── */
-.ticker-wrap {
-    border-top: 1px solid rgba(255, 255, 255, 0.05);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-    overflow: hidden;
-    padding: 20px 0;
-    background: rgba(139, 124, 246, 0.02); /* Slight purple tint */
-}
 
-.ticker-inner {
-    display: flex;
-    align-items: center;
-    gap: 40px;
-    width: max-content;
-    animation: ticker 25s linear infinite;
-    font-size: 0.95rem;
-    font-weight: 600;
-    color: var(--text); /* Brighter text */
-    letter-spacing: 0.02em;
-}
-
-.sep { 
-    color: var(--purple);
-    font-size: 1.2rem;
-    opacity: 0.8;
-}
 
 /* ── FEATURES ─────────────────────────────── */
 .features {
