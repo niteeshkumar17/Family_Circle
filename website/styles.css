@@ -71,9 +71,8 @@ img { display: block; max-width: 100%; }
 
 .brand-img {
     width: 28px; height: 28px;
-    border-radius: 8px;
-    object-fit: contain;
-    background: #fff;
+    border-radius: 6px;
+    object-fit: cover;
 }
 
 .nav-center {
