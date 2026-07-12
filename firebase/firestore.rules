@@ -38,6 +38,14 @@ service cloud.firestore {
       return userFamilies.hasAny(otherFamilies);
     }
     
+    // ============== APP CONFIG ==================
+    
+    match /app_config/{document=**} {
+      // Anyone can read app configuration (like updates)
+      allow read: if true;
+      allow write: if false; // Only admins from console can write
+    }
+
     // ============== USERS COLLECTION ==============
     
     match /users/{userId} {
