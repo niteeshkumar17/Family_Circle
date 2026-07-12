@@ -586,27 +586,40 @@ class FamilyService {
 
     final familyId = _currentFamilyId!;
 
-    // Remove user from family members
-    await _firestore
-        .collection('families')
-        .doc(familyId)
-        .collection('members')
-        .doc(user.uid)
-        .delete();
+    try {
+      // Remove user from family members
+      await _firestore
+          .collection('families')
+          .doc(familyId)
+          .collection('members')
+          .doc(user.uid)
+          .delete();
 
-    // Remove user from family memberIds
-    await _firestore.collection('families').doc(familyId).update({
-      'memberIds': FieldValue.arrayRemove([user.uid]),
-    });
+      // Remove user from family memberIds
+      await _firestore.collection('families').doc(familyId).update({
+        'memberIds': FieldValue.arrayRemove([user.uid]),
+      });
+    } on FirebaseException catch (e) {
+      // If we get permission-denied or not-found, it usually means we were 
+      // already removed by an admin. We gracefully catch this and proceed to 
+      // clean up our local state.
+      if (e.code != 'permission-denied' && e.code != 'not-found') {
+        rethrow;
+      }
+    }
 
-    // Remove family from user's familyIds
-    await _firestore.collection('users').doc(user.uid).update({
-      'familyIds': FieldValue.arrayRemove([familyId]),
-      'currentFamilyId': null,
-    });
+    try {
+      // Remove family from user's familyIds
+      await _firestore.collection('users').doc(user.uid).update({
+        'familyIds': FieldValue.arrayRemove([familyId]),
+        'currentFamilyId': null,
+      });
 
-    // Remove user's location data
-    await _database.ref('locations/$familyId/${user.uid}').remove();
+      // Remove user's location data
+      await _database.ref('locations/$familyId/${user.uid}').remove();
+    } catch (e) {
+      // Best effort cleanup
+    }
 
     // Stop listening and clear current family
     _familySubscription?.cancel();
@@ -661,39 +674,54 @@ class FamilyService {
 
     final familyId = _currentFamilyId!;
 
-    // Check if user is admin
-    final familyDoc = await _firestore.collection('families').doc(familyId).get();
-    if (familyDoc.data()?['createdBy'] != user.uid) {
-      throw Exception('Only the family admin can delete the family');
+    try {
+      // Check if user is admin
+      final familyDoc = await _firestore.collection('families').doc(familyId).get();
+      if (familyDoc.exists) {
+        if (familyDoc.data()?['createdBy'] != user.uid) {
+          throw Exception('Only the family admin can delete the family');
+        }
+
+        // Get all member IDs
+        final memberIds = List<String>.from(familyDoc.data()?['memberIds'] ?? []);
+
+        // Remove family from all members' familyIds
+        for (final memberId in memberIds) {
+          await _firestore.collection('users').doc(memberId).update({
+            'familyIds': FieldValue.arrayRemove([familyId]),
+            'currentFamilyId': null,
+          });
+        }
+
+        // Delete all members in subcollection
+        final membersSnapshot = await _firestore
+            .collection('families')
+            .doc(familyId)
+            .collection('members')
+            .get();
+        for (final doc in membersSnapshot.docs) {
+          await doc.reference.delete();
+        }
+
+        // Delete the family document
+        await _firestore.collection('families').doc(familyId).delete();
+
+        // Delete location data
+        await _database.ref('locations/$familyId').remove();
+      }
+    } on FirebaseException catch (e) {
+      if (e.code != 'permission-denied' && e.code != 'not-found') {
+        rethrow;
+      }
     }
 
-    // Get all member IDs
-    final memberIds = List<String>.from(familyDoc.data()?['memberIds'] ?? []);
-
-    // Remove family from all members' familyIds
-    for (final memberId in memberIds) {
-      await _firestore.collection('users').doc(memberId).update({
+    try {
+      // Fallback: Ensure current user removes this from their own doc if something failed
+      await _firestore.collection('users').doc(user.uid).update({
         'familyIds': FieldValue.arrayRemove([familyId]),
         'currentFamilyId': null,
       });
-    }
-
-    // Delete all members subcollection
-    final membersSnapshot = await _firestore
-        .collection('families')
-        .doc(familyId)
-        .collection('members')
-        .get();
-    
-    for (final doc in membersSnapshot.docs) {
-      await doc.reference.delete();
-    }
-
-    // Delete location data for all members
-    await _database.ref('locations/$familyId').remove();
-
-    // Delete the family document
-    await _firestore.collection('families').doc(familyId).delete();
+    } catch (_) {}
 
     // Stop listening and clear current family
     _familySubscription?.cancel();
