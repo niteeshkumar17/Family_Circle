@@ -815,27 +815,16 @@ footer {
     .hero {
         padding: 160px 20px 60px; /* huge top padding to clear navbar */
     }
-    .hero h1 {
-        font-size: clamp(2rem, 6vw, 3.5rem);
-    }
 
     /* Force vertical stack on anything smaller than desktop */
     .hero-cards {
         flex-direction: column !important;
-        gap: 24px !important;
         margin-top: 40px;
     }
-    .hcard-left {
-        margin: 0 !important;
-        align-self: center !important;
-    }
-    .hcard-stack {
-        margin: 0 !important;
-        align-items: center !important;
-        gap: 16px !important;
-    }
-    .hcard-sos {
-        margin: 0 !important;
+    
+    /* Hide floating cards completely on mobile */
+    .hcard-left, .hcard-stack {
+        display: none !important;
     }
     
     .phone {
