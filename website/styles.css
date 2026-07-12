@@ -834,8 +834,9 @@ footer {
     .feat-grid { grid-template-columns: 1fr 1fr; }
     .feat-large { grid-column: span 1; }
 
-    .steps { flex-direction: column; gap: 20px; }
-    .step-line { width: 2px; height: 40px; margin: 10px 0; }
+    .steps { flex-direction: column; gap: 0; }
+    .step-card { padding: 28px 24px; }
+    .step-line { width: 100%; height: 1px; margin: 0; }
 
     .footer-inner { grid-template-columns: 1fr; gap: 40px; }
     .footer-bar { flex-direction: column; gap: 12px; align-items: center; text-align: center; }
