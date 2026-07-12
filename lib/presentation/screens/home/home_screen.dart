@@ -14,6 +14,7 @@ import '../../../services/family_service.dart';
 import '../../../services/notification_service.dart';
 import '../../../data/models/geofence_model.dart';
 import '../../../data/models/notification_model.dart';
+import '../../../services/update_service.dart';
 import '../../blocs/auth/auth_bloc.dart';
 import '../family/family_screen.dart';
 
@@ -34,6 +35,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _checkPermissions();
+    
+    // Check for OTA updates after frame renders
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      UpdateService().checkForUpdates(context);
+    });
   }
 
   @override

@@ -59,6 +59,10 @@ dependencies:
   dio: ^5.4.0
   connectivity_plus: ^6.0.0
 
+  # App Updates
+  package_info_plus: ^8.0.0
+  open_filex: ^4.5.0
+
   # Dependency Injection
   get_it: ^7.6.4
   injectable: ^2.3.2
@@ -72,6 +76,10 @@ dependencies:
 
   # Battery Info
   battery_plus: ^6.0.0
+  app_links: ^6.4.1
+  flutter_dotenv: ^6.0.1
+  flutter_tts: ^4.2.5
+  google_generative_ai: ^0.4.7
 
 dev_dependencies:
   flutter_test:
