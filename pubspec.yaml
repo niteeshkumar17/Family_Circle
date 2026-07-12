@@ -76,7 +76,7 @@ dependencies:
 
   # Battery Info
   battery_plus: ^6.0.0
-  app_links: ^6.4.1
+  app_links: ^3.5.1
   flutter_dotenv: ^6.0.1
   flutter_tts: ^4.2.5
   google_generative_ai: ^0.4.7
