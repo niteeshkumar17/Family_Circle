@@ -880,8 +880,14 @@ footer {
         justify-self: start;
         margin-top: 8px;
     }
-    .footer-cols { flex-direction: column; gap: 32px; text-align: center; }
-    .footer-cols div { align-items: center; }
+    
+    .footer-cols { 
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 32px 16px;
+        text-align: left;
+    }
+    .footer-cols div { align-items: flex-start; }
     .cta-box { padding: 40px 20px; }
     
     .store-btns {
