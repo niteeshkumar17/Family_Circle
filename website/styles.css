@@ -377,24 +377,30 @@ img { display: block; max-width: 100%; }
 
 /* ── TICKER ───────────────────────────────── */
 .ticker-wrap {
-    border-top: 1px solid var(--border);
-    border-bottom: 1px solid var(--border);
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
     overflow: hidden;
-    padding: 14px 0;
-    background: var(--bg-2);
+    padding: 20px 0;
+    background: rgba(139, 124, 246, 0.02); /* Slight purple tint */
 }
 
 .ticker-inner {
     display: flex;
-    gap: 28px;
+    align-items: center;
+    gap: 40px;
     width: max-content;
     animation: ticker 25s linear infinite;
-    font-size: 0.82rem;
-    font-weight: 500;
-    color: var(--text-2);
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text); /* Brighter text */
+    letter-spacing: 0.02em;
 }
 
-.sep { color: var(--text-3); }
+.sep { 
+    color: var(--purple);
+    font-size: 1.2rem;
+    opacity: 0.8;
+}
 
 /* ── FEATURES ─────────────────────────────── */
 .features {
