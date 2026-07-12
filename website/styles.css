@@ -443,17 +443,22 @@ img { display: block; max-width: 100%; }
 .hcard {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 12px 20px;
-    background: rgba(20, 20, 25, 0.7);
+    gap: 14px;
+    padding: 14px 22px;
+    background: rgba(20, 20, 25, 0.55);
     border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 16px;
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
-    box-shadow: 0 10px 30px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.1);
-    min-width: 160px;
+    border-radius: 20px;
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    box-shadow: 0 16px 40px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.15);
+    min-width: 170px;
     position: relative;
     z-index: 3;
+    transition: transform 0.3s ease;
+}
+
+.hcard:hover {
+    transform: translateY(-5px) scale(1.02);
 }
 
 .hcard-dot {
@@ -466,38 +471,39 @@ img { display: block; max-width: 100%; }
 .amber-dot { background: var(--amber); box-shadow: 0 0 12px var(--amber); }
 
 .hcard-info { display: flex; flex-direction: column; gap: 3px; }
-.hcard-name { font-size: 0.9rem; font-weight: 600; color: #fff; }
+.hcard-name { font-size: 0.95rem; font-weight: 600; color: #fff; }
 .hcard-loc  { font-size: 0.75rem; color: var(--text-2); }
 
 .hcard-left { 
     align-self: center; 
-    margin-right: -40px; 
-    margin-top: -60px;
+    margin-right: -50px; 
+    margin-top: -80px;
     animation: floatA 5s ease-in-out infinite; 
 }
 
 .hcard-stack {
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 28px;
     align-self: center;
     margin-left: -50px;
-    margin-top: 60px;
+    margin-top: 40px;
     position: relative;
     z-index: 3;
 }
 
-.hcard-right { animation: floatA 5s 1.5s ease-in-out infinite; }
+.hcard-right { 
+    animation: floatA 5s 1.5s ease-in-out infinite; 
+}
 
 .hcard-sos {
-    padding: 12px 20px;
-    gap: 10px;
     background: rgba(239, 68, 68, 0.15);
-    border-color: rgba(239, 68, 68, 0.3);
-    font-size: 0.82rem;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    box-shadow: 0 16px 40px rgba(0,0,0,0.6), 0 0 30px rgba(239, 68, 68, 0.15), inset 0 1px 0 rgba(239, 68, 68, 0.2);
+    margin-left: 30px;
+    color: #fca5a5;
     font-weight: 600;
-    color: var(--red);
-    animation: floatA 5s 3s ease-in-out infinite;
+    animation: floatA 4.5s 0.5s ease-in-out infinite;
 }
 
 
