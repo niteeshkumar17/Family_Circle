@@ -813,13 +813,13 @@ footer {
     #ham { display: block; }
 
     .hero {
-        padding: 120px 20px 40px; /* reduced top and bottom padding */
+        padding: 100px 20px 20px; /* tighter spacing for mobile */
     }
 
     /* Force vertical stack on anything smaller than desktop */
     .hero-cards {
         flex-direction: column !important;
-        margin-top: 20px;
+        margin-top: 10px;
     }
     
     /* Hide floating cards completely on mobile */
@@ -844,21 +844,39 @@ footer {
 @media (max-width: 600px) {
     #navbar { top: 10px; width: calc(100% - 24px); }
     
-    .feat-grid { grid-template-columns: 1fr; gap: 16px; }
+    .feat-grid { grid-template-columns: 1fr; gap: 12px; }
     .feat-card {
-        padding: 20px 16px;
-        gap: 8px;
+        display: grid;
+        grid-template-columns: auto 1fr;
+        padding: 16px;
+        gap: 4px 12px;
+        align-items: center;
     }
-    .feat-icon-box {
+    .feat-card > .feat-icon-box {
+        grid-column: 1;
+        grid-row: 1;
         width: 36px; height: 36px;
         border-radius: 10px;
+        margin-bottom: 0;
     }
-    .feat-card h3 {
-        font-size: 0.95rem;
+    .feat-card > h3 {
+        grid-column: 2;
+        grid-row: 1;
+        font-size: 1rem;
+        margin-bottom: 0;
     }
-    .feat-card p {
+    .feat-card > p {
+        grid-column: 1 / -1;
+        grid-row: 2;
         font-size: 0.85rem;
         line-height: 1.5;
+        margin-top: 6px;
+    }
+    .feat-card > .feat-chip {
+        grid-column: 1 / -1;
+        grid-row: 3;
+        justify-self: start;
+        margin-top: 4px;
     }
     .footer-cols { flex-direction: column; gap: 32px; text-align: center; }
     .footer-cols div { align-items: center; }
