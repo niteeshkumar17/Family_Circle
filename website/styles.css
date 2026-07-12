@@ -845,13 +845,20 @@ footer {
 @media (max-width: 600px) {
     #navbar { top: 10px; width: calc(100% - 24px); }
     
-    .feat-grid { grid-template-columns: 1fr; gap: 12px; }
+    .feat-grid { grid-template-columns: 1fr; gap: 0; }
     .feat-card {
         display: grid;
         grid-template-columns: auto 1fr;
-        padding: 16px;
-        gap: 0 16px;
+        padding: 24px 0;
+        gap: 4px 16px;
         align-items: start;
+        background: transparent;
+        border: none;
+        border-bottom: 1px solid rgba(255,255,255,0.05);
+        border-radius: 0;
+    }
+    .feat-card:last-child {
+        border-bottom: none;
     }
     .feat-card > .feat-icon-box {
         grid-column: 1;
