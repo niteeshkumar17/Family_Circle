@@ -479,6 +479,7 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
                         SizedBox(height: 8),
                         Text(
                           'All family members have been notified',
+                          textAlign: TextAlign.center,
                           style: TextStyle(
                             color: AppTheme.textSecondary,
                           ),
@@ -533,11 +534,11 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
                       child: ElevatedButton.icon(
                         onPressed: _callEmergency,
                         icon: const Icon(Icons.phone),
-                        label: const Text('Emergency Call'),
+                        label: const Text('Emergency', textAlign: TextAlign.center, maxLines: 1),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.white,
                           foregroundColor: Colors.red,
-                          padding: const EdgeInsets.symmetric(vertical: 16),
+                          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(16),
                           ),
@@ -591,6 +592,8 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
                 Text(
                   name,
                   style: const TextStyle(fontWeight: FontWeight.w600),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
                 Text(
                   status,
