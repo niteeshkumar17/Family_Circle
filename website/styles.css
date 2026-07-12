@@ -849,13 +849,13 @@ footer {
         display: grid;
         grid-template-columns: auto 1fr;
         padding: 16px;
-        gap: 4px 12px;
-        align-items: center;
+        gap: 0 16px;
+        align-items: start;
     }
     .feat-card > .feat-icon-box {
         grid-column: 1;
-        grid-row: 1;
-        width: 36px; height: 36px;
+        grid-row: 1 / span 3; /* spans title, desc, and chip */
+        width: 40px; height: 40px; /* slightly larger for balance */
         border-radius: 10px;
         margin-bottom: 0;
     }
@@ -863,20 +863,21 @@ footer {
         grid-column: 2;
         grid-row: 1;
         font-size: 1rem;
-        margin-bottom: 0;
+        margin-bottom: 4px;
+        margin-top: 2px;
     }
     .feat-card > p {
-        grid-column: 1 / -1;
+        grid-column: 2;
         grid-row: 2;
         font-size: 0.85rem;
         line-height: 1.5;
-        margin-top: 6px;
+        margin-top: 0;
     }
     .feat-card > .feat-chip {
-        grid-column: 1 / -1;
+        grid-column: 2;
         grid-row: 3;
         justify-self: start;
-        margin-top: 4px;
+        margin-top: 8px;
     }
     .footer-cols { flex-direction: column; gap: 32px; text-align: center; }
     .footer-cols div { align-items: center; }
