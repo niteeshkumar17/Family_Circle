@@ -40,6 +40,7 @@ class BackgroundLocationService {
         notificationChannelId: 'family_nest_location',
         initialNotificationTitle: 'Flockar',
         initialNotificationContent: 'Location sharing is active',
+        initialNotificationIcon: 'ic_launcher',
         foregroundServiceNotificationId: 889, // Changed from 888 to 889
         autoStartOnBoot: false, // Prevent native crash if permissions revoked
       ),
