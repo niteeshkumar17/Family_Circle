@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 import '../data/models/location_model.dart';
 import '../data/models/geofence_model.dart';
+import '../services/notification_service.dart';
 
 /// Family Service
 /// 
@@ -20,6 +21,8 @@ class FamilyService {
 
   String? _currentFamilyId;
   StreamSubscription? _familySubscription;
+  StreamSubscription? _sosSubscription;
+  bool _isFirstFamilyLoad = true;
   final _familyMembersController = StreamController<List<FamilyMemberData>>.broadcast();
 
   /// Stream of family members with their locations
@@ -283,6 +286,8 @@ class FamilyService {
     if (_currentFamilyId == null) return;
 
     _familySubscription?.cancel();
+    _sosSubscription?.cancel();
+    _isFirstFamilyLoad = true;
     
     // Listen to family members from Firestore
     _familySubscription = _firestore
@@ -291,6 +296,34 @@ class FamilyService {
         .collection('members')
         .snapshots()
         .listen((snapshot) async {
+          // Check for member added/removed to trigger notifications
+          if (!_isFirstFamilyLoad) {
+            for (var change in snapshot.docChanges) {
+              if (change.type == DocumentChangeType.added) {
+                final data = change.doc.data();
+                if (data != null && data['userId'] != currentUserId) {
+                  final familyInfo = await getCurrentFamilyInfo();
+                  final name = familyInfo?.familyName ?? 'the nest';
+                  NotificationService().showMemberJoinedNotification(
+                    userName: data['displayName'] ?? 'A member',
+                    familyName: name,
+                  );
+                }
+              } else if (change.type == DocumentChangeType.removed) {
+                final data = change.doc.data();
+                if (data != null && data['userId'] == currentUserId) {
+                  final familyInfo = await getCurrentFamilyInfo();
+                  final name = familyInfo?.familyName ?? 'the nest';
+                  NotificationService().showRemovedFromFamilyNotification(
+                    familyName: name,
+                  );
+                  _handleSelfRemovedFromFamily();
+                }
+              }
+            }
+          }
+          _isFirstFamilyLoad = false;
+
           final members = <FamilyMemberData>[];
           
           for (final doc in snapshot.docs) {
@@ -353,6 +386,48 @@ class FamilyService {
 
           _familyMembersController.add(members);
         });
+
+    // Listen for active SOS events for this family
+    _sosSubscription = _firestore
+        .collection('sos_events')
+        .where('familyId', isEqualTo: _currentFamilyId)
+        .where('status', isEqualTo: 'active')
+        .where('createdAt', isGreaterThan: Timestamp.now())
+        .snapshots()
+        .listen((snapshot) {
+          for (var change in snapshot.docChanges) {
+            if (change.type == DocumentChangeType.added) {
+              final data = change.doc.data();
+              if (data != null && data['userId'] != currentUserId) {
+                NotificationService().showSOSNotification(
+                  userName: data['userName'] ?? 'A member',
+                  eventId: change.doc.id,
+                  latitude: data['triggerLocation']?['latitude'] ?? 0.0,
+                  longitude: data['triggerLocation']?['longitude'] ?? 0.0,
+                );
+              }
+            }
+          }
+        });
+  }
+
+  /// Handles when current user is removed from the family
+  Future<void> _handleSelfRemovedFromFamily() async {
+    final user = _auth.currentUser;
+    if (user == null || _currentFamilyId == null) return;
+    
+    final familyId = _currentFamilyId!;
+    try {
+      await _firestore.collection('users').doc(user.uid).update({
+        'familyIds': FieldValue.arrayRemove([familyId]),
+        'currentFamilyId': null,
+      });
+      await _database.ref('locations/$familyId/${user.uid}').remove();
+    } catch (_) {}
+
+    _familySubscription?.cancel();
+    _sosSubscription?.cancel();
+    _currentFamilyId = null;
   }
 
   /// Check if timestamp is recent (within 2 minutes)
@@ -623,6 +698,7 @@ class FamilyService {
 
     // Stop listening and clear current family
     _familySubscription?.cancel();
+    _sosSubscription?.cancel();
     _currentFamilyId = null;
   }
 
@@ -725,6 +801,7 @@ class FamilyService {
 
     // Stop listening and clear current family
     _familySubscription?.cancel();
+    _sosSubscription?.cancel();
     _currentFamilyId = null;
   }
   

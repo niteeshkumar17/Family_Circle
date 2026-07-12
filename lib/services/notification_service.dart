@@ -364,6 +364,54 @@ class NotificationService {
     );
   }
 
+  /// Show member joined notification
+  Future<void> showMemberJoinedNotification({
+    required String userName,
+    required String familyName,
+  }) async {
+    await _showLocalNotification(
+      title: '👋 New Member',
+      body: '$userName joined $familyName',
+      channelId: 'family_updates',
+    );
+
+    await _saveNotificationToFirestore(
+      NotificationModel(
+        id: '',
+        userId: FirebaseAuth.instance.currentUser?.uid ?? '',
+        type: NotificationType.familyJoin,
+        title: '👋 New Member',
+        body: '$userName joined $familyName',
+        createdAt: DateTime.now(),
+        priority: NotificationPriority.normal,
+      ),
+    );
+  }
+
+  /// Show removed from family notification
+  Future<void> showRemovedFromFamilyNotification({
+    required String familyName,
+  }) async {
+    await _showLocalNotification(
+      title: 'ℹ️ Nest Update',
+      body: 'You have been removed from $familyName',
+      channelId: 'family_updates',
+      importance: Importance.high,
+    );
+
+    await _saveNotificationToFirestore(
+      NotificationModel(
+        id: '',
+        userId: FirebaseAuth.instance.currentUser?.uid ?? '',
+        type: NotificationType.familyLeave,
+        title: 'ℹ️ Nest Update',
+        body: 'You have been removed from $familyName',
+        createdAt: DateTime.now(),
+        priority: NotificationPriority.high,
+      ),
+    );
+  }
+
   /// Show low battery notification
   Future<void> showLowBatteryNotification({
     required String userName,
