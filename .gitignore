@@ -52,3 +52,5 @@ firebase/functions/node_modules/
 
 # Sensitive Data
 lib/firebase_options.dart
+
+.firebase/

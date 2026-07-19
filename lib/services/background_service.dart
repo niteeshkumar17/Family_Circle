@@ -40,8 +40,8 @@ class BackgroundLocationService {
         notificationChannelId: 'family_nest_location',
         initialNotificationTitle: 'Flockar',
         initialNotificationContent: 'Location sharing is active',
-        foregroundServiceNotificationId: 889, // Changed from 888 to 889
-        autoStartOnBoot: false, // Prevent native crash if permissions revoked
+        foregroundServiceNotificationId: 889,
+        autoStartOnBoot: true, // Survive device reboots — service restarts automatically
       ),
       iosConfiguration: IosConfiguration(
         autoStart: false,
@@ -173,8 +173,10 @@ Future<void> onStart(ServiceInstance service) async {
     double? lastLng;
     double? lastAccuracy;
     DateTime? lastUpdateTime;
+    DateTime? lastGpsFreshTime; // When we last got a FRESH GPS fix
     String? lastAddress; // Cache the address for stationary device
     String? presenceRegisteredUserId;
+    DateTime? lastLocationStreamEvent; // Track if stream is still alive
     int timerTickCount = 0;
 
     // ─── Services ───
@@ -368,6 +370,7 @@ Future<void> onStart(ServiceInstance service) async {
       locationSubscription?.cancel();
       locationSubscription = location.onLocationChanged.listen(
         (position) async {
+          lastLocationStreamEvent = DateTime.now(); // Track stream liveness
           if (!locationSharingEnabled || userId == null || familyId == null) return;
 
           final now = DateTime.now();
@@ -401,12 +404,15 @@ Future<void> onStart(ServiceInstance service) async {
             lastLng = lng.toDouble();
             lastAccuracy = position.accuracy;
             lastUpdateTime = now;
+            lastGpsFreshTime = now;
             await savePositionToPrefs(lastLat!, lastLng!);
 
             service.invoke('locationUpdate', data);
           } catch (_) {}
         },
-        onError: (_) {},
+        onError: (_) {
+          // Stream errored — will be re-subscribed by keep-alive timer
+        },
         cancelOnError: false,
       );
     }
@@ -505,7 +511,7 @@ Future<void> onStart(ServiceInstance service) async {
     // The timer NEVER blocks on GPS for more than 15 seconds total.
     // Even if GPS fails, we push last-known coords with a fresh timestamp.
     // ════════════════════════════════════════════════════════════════════════
-    Timer.periodic(const Duration(minutes: 1), (timer) async {
+    Timer.periodic(const Duration(seconds: 30), (timer) async {
       timerTickCount++;
 
       // Step 1: Update notification FIRST (diagnostic — proves timer fires)
@@ -514,6 +520,19 @@ Future<void> onStart(ServiceInstance service) async {
           title: 'Flockar',
           content: 'Location sharing active',
         );
+      }
+
+      // Step 1.5: Re-subscribe to location stream if it has gone dead
+      // Android may kill the stream silently after extended background time
+      if (lastLocationStreamEvent != null) {
+        final streamAge = DateTime.now().difference(lastLocationStreamEvent!).inMinutes;
+        if (streamAge > 3) {
+          // Stream hasn't delivered an event in 3+ minutes — it's dead
+          startLocationListening();
+        }
+      } else {
+        // Stream never fired — try re-subscribing
+        startLocationListening();
       }
 
       // Step 2: Reload identity (handles race condition where main app
@@ -546,14 +565,13 @@ Future<void> onStart(ServiceInstance service) async {
       } catch (_) {}
 
       if (!locationSharingEnabled || familyId == null) {
-          // Removed paused notification update
         return;
       }
 
-      // Step 4: Try GPS with SHORT timeout, then push whatever we have
-      double? lat = lastLat;
-      double? lng = lastLng;
-      double? accuracy = lastAccuracy;
+      // Step 4: Try GPS with SHORT timeout
+      double? lat;
+      double? lng;
+      double? accuracy;
       double? speed;
       double? heading;
       double? altitude;
@@ -573,11 +591,13 @@ Future<void> onStart(ServiceInstance service) async {
           gpsFresh = true;
         }
       } catch (_) {
-        // GPS failed — will use last-known coordinates below
+        // GPS failed — do NOT fall back to stale coordinates
       }
 
-      // Push location (fresh or stale coords, always fresh timestamp)
-      if (lat != null && lng != null && lat != 0 && lng != 0) {
+      // ONLY push if we got a FRESH GPS fix
+      // Pushing stale coords with fresh timestamps makes the user appear
+      // at their old location labeled "Just now" — which is misleading
+      if (gpsFresh && lat != null && lng != null && lat != 0 && lng != 0) {
         final data = await buildPayload(
           lat: lat,
           lng: lng,
@@ -587,17 +607,14 @@ Future<void> onStart(ServiceInstance service) async {
           altitude: altitude,
         );
 
-        final ok = await pushToFirebase(data);
+        await pushToFirebase(data);
 
-        if (gpsFresh) {
-          lastLat = lat;
-          lastLng = lng;
-          lastAccuracy = accuracy;
-          await savePositionToPrefs(lat, lng);
-        }
+        lastLat = lat;
+        lastLng = lng;
+        lastAccuracy = accuracy;
         lastUpdateTime = now;
-
-        // Removed location push notification update
+        lastGpsFreshTime = now;
+        await savePositionToPrefs(lat, lng);
 
         service.invoke('locationUpdate', data);
 
@@ -605,9 +622,15 @@ Future<void> onStart(ServiceInstance service) async {
           await prefs!.setString('bg_service_status', 'location_pushed');
           await prefs.setString('bg_service_last_push', now.toIso8601String());
         } catch (_) {}
+      } else if (!gpsFresh && lastLat != null && lastLng != null) {
+        // GPS failed — only update presence timestamp, NOT location coordinates
+        // This way the UI can distinguish "online but GPS unavailable" from
+        // "actively at this location right now"
+        try {
+          await prefs!.setString('bg_service_status', 'gps_failed_presence_only');
+        } catch (_) {}
       } else {
         // No coordinates at all (neither GPS nor cached)
-        // Removed waiting for GPS notification update
         try {
           await prefs!.setString('bg_service_status', 'no_coordinates');
         } catch (_) {}

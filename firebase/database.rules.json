@@ -45,6 +45,15 @@
           ".write": "auth != null && auth.uid == $userId"
         }
       }
+    },
+    
+    "locationHistory": {
+      "$familyId": {
+        ".read": "auth != null",
+        "$userId": {
+          ".write": "auth != null && auth.uid == $userId"
+        }
+      }
     }
   }
 }
