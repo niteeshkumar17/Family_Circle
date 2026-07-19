@@ -371,12 +371,33 @@ class FamilyService {
               // Location not available
             }
 
+            // Check presence node for online status (independent of GPS)
+            bool memberOnline = false;
+            try {
+              final presenceSnapshot = await _database
+                  .ref('presence/$memberId')
+                  .get();
+              if (presenceSnapshot.exists) {
+                final presData = presenceSnapshot.value as Map<dynamic, dynamic>;
+                final isPresenceOnline = presData['online'] == true;
+                final lastSeenMs = presData['lastSeen'] as int?;
+                if (isPresenceOnline && lastSeenMs != null) {
+                  final lastSeenTime = DateTime.fromMillisecondsSinceEpoch(lastSeenMs);
+                  memberOnline = DateTime.now().difference(lastSeenTime).inMinutes < 5;
+                }
+              }
+            } catch (_) {}
+            // Fallback: also consider online if location timestamp is very recent
+            if (!memberOnline) {
+              memberOnline = _isRecentlyActive(location?.timestamp);
+            }
+
             members.add(FamilyMemberData(
               id: memberId,
               displayName: memberName,
               photoUrl: data['photoUrl'],
               role: data['role'] ?? 'member',
-              isOnline: _isRecentlyActive(location?.timestamp),
+              isOnline: memberOnline,
               location: location,
               battery: location?.battery ?? 100,
               isCurrentUser: isCurrent,
@@ -494,12 +515,32 @@ class FamilyService {
         // Location not available
       }
 
+      // Check presence node for online status
+      bool memberOnline = false;
+      try {
+        final presenceSnapshot = await _database
+            .ref('presence/$memberId')
+            .get();
+        if (presenceSnapshot.exists) {
+          final presData = presenceSnapshot.value as Map<dynamic, dynamic>;
+          final isPresenceOnline = presData['online'] == true;
+          final lastSeenMs = presData['lastSeen'] as int?;
+          if (isPresenceOnline && lastSeenMs != null) {
+            final lastSeenTime = DateTime.fromMillisecondsSinceEpoch(lastSeenMs);
+            memberOnline = DateTime.now().difference(lastSeenTime).inMinutes < 5;
+          }
+        }
+      } catch (_) {}
+      if (!memberOnline) {
+        memberOnline = _isRecentlyActive(location?.timestamp);
+      }
+
       members.add(FamilyMemberData(
         id: memberId,
         displayName: memberName,
         photoUrl: data['photoUrl'],
         role: data['role'] ?? 'member',
-        isOnline: _isRecentlyActive(location?.timestamp),
+        isOnline: memberOnline,
         location: location,
         battery: location?.battery ?? 100,
         isCurrentUser: isCurrent,
@@ -910,12 +951,32 @@ class FamilyService {
               }
             } catch (_) {}
 
+            // Check presence node for online status
+            bool memberOnline = false;
+            try {
+              final presenceSnapshot = await _database
+                  .ref('presence/$memberId')
+                  .get();
+              if (presenceSnapshot.exists) {
+                final presData = presenceSnapshot.value as Map<dynamic, dynamic>;
+                final isPresenceOnline = presData['online'] == true;
+                final lastSeenMs = presData['lastSeen'] as int?;
+                if (isPresenceOnline && lastSeenMs != null) {
+                  final lastSeenTime = DateTime.fromMillisecondsSinceEpoch(lastSeenMs);
+                  memberOnline = DateTime.now().difference(lastSeenTime).inMinutes < 5;
+                }
+              }
+            } catch (_) {}
+            if (!memberOnline) {
+              memberOnline = _isRecentlyActive(location?.timestamp);
+            }
+
             members.add(FamilyMemberData(
               id: memberId,
               displayName: memberName,
               photoUrl: data['photoUrl'],
               role: data['role'] ?? 'member',
-              isOnline: _isRecentlyActive(location?.timestamp),
+              isOnline: memberOnline,
               location: location,
               battery: location?.battery ?? 100,
               isCurrentUser: memberId == currentUserId,
@@ -1021,8 +1082,8 @@ class FamilyMemberData {
 
   /// Get status text based on location
   String get statusText {
-    if (!isOnline) return 'Offline';
     if (location?.address != null) return location!.address!;
+    if (!isOnline) return 'Offline';
     if (location != null) return 'Location available';
     return 'Online';
   }
@@ -1033,7 +1094,7 @@ class FamilyMemberData {
   /// Get speed in km/h
   double get speedKmh => (location?.speed ?? 0) * 3.6;
 
-  /// Get time ago text
+  /// Get time ago text — shows when location was last updated (not online status)
   String get lastSeenText {
     if (location?.timestamp == null) return 'Never';
     

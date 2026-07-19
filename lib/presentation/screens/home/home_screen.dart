@@ -1241,15 +1241,18 @@ class _FamilyListContentState extends State<FamilyListContent> {
                   Row(
                     children: [
                       Icon(
-                        member.isOnline ? Icons.circle : Icons.access_time,
+                        member.isOnline ? Icons.location_on : Icons.location_off,
                         size: 14,
                         color: member.isOnline ? AppTheme.successColor : AppTheme.textSecondary,
                       ),
                       const SizedBox(width: 4),
-                      Text(
-                        member.isOnline ? 'Online' : _formatLastSeen(member.lastSeen),
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: AppTheme.textSecondary,
+                      Expanded(
+                        child: Text(
+                          member.statusText,
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: AppTheme.textSecondary,
+                          ),
+                          overflow: TextOverflow.ellipsis,
                         ),
                       ),
                     ],
@@ -1278,7 +1281,7 @@ class _FamilyListContentState extends State<FamilyListContent> {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  '2 min ago',
+                  member.lastSeenText,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                     color: AppTheme.textHint,
                     fontSize: 11,

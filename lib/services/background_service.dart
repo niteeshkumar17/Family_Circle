@@ -623,11 +623,43 @@ Future<void> onStart(ServiceInstance service) async {
           await prefs.setString('bg_service_last_push', now.toIso8601String());
         } catch (_) {}
       } else if (!gpsFresh && lastLat != null && lastLng != null) {
-        // GPS failed — only update presence timestamp, NOT location coordinates
-        // This way the UI can distinguish "online but GPS unavailable" from
-        // "actively at this location right now"
+        // GPS failed — update presence fields (timestamp, battery, isActive)
+        // WITHOUT overwriting coordinates. This keeps the member "Online"
+        // at their last known location rather than going "Offline".
         try {
-          await prefs!.setString('bg_service_status', 'gps_failed_presence_only');
+          int batteryLevel = 100;
+          bool isCharging = false;
+          try {
+            batteryLevel = await battery.batteryLevel;
+            final bs = await battery.batteryState;
+            isCharging = bs == BatteryState.charging || bs == BatteryState.full;
+          } catch (_) {}
+
+          String networkStatus = 'unknown';
+          try {
+            final cr = await connectivity.checkConnectivity();
+            if (cr.contains(ConnectivityResult.wifi)) {
+              networkStatus = 'wifi';
+            } else if (cr.contains(ConnectivityResult.mobile)) {
+              networkStatus = 'mobile';
+            } else {
+              networkStatus = 'offline';
+            }
+          } catch (_) {}
+
+          // Use .update() instead of .set() so we DON'T overwrite lat/lng
+          await database.ref('locations/$familyId/$userId').update({
+            'timestamp': now.millisecondsSinceEpoch,
+            'isActive': true,
+            'battery': batteryLevel,
+            'isCharging': isCharging,
+            'networkStatus': networkStatus,
+          });
+
+          lastUpdateTime = now;
+        } catch (_) {}
+        try {
+          await prefs!.setString('bg_service_status', 'heartbeat_no_gps');
         } catch (_) {}
       } else {
         // No coordinates at all (neither GPS nor cached)
