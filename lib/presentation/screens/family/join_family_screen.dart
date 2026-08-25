@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import '../../../config/routes.dart';
 import '../../../services/family_service.dart';
-import '../../../services/background_service.dart';
 
 class JoinFamilyScreen extends StatefulWidget {
   const JoinFamilyScreen({super.key});
@@ -24,17 +22,7 @@ class _JoinFamilyScreenState extends State<JoinFamilyScreen> {
       if (!mounted) return;
       
       if (success) {
-        // Configure background service with new family
-        final user = FirebaseAuth.instance.currentUser;
-        final familyId = _familyService.currentFamilyId;
-        if (user != null && familyId != null) {
-          await BackgroundLocationService().configureForUser(
-            userId: user.uid,
-            familyId: familyId,
-          );
-        }
-        
-        if (!mounted) return;
+        // joinFamily also points the tracking services at the new nest.
         Navigator.pushReplacementNamed(context, AppRoutes.home);
       } else {
         ScaffoldMessenger.of(context).showSnackBar(

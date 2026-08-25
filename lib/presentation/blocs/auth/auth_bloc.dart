@@ -1,9 +1,14 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:equatable/equatable.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../../services/background_service.dart';
+import '../../../services/family_service.dart';
+import '../../../services/location_cache_service.dart';
+import '../../../services/location_service.dart';
+import '../../../services/notification_service.dart';
 // Events
 abstract class AuthEvent extends Equatable {
   @override
@@ -129,7 +134,42 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
     AuthLogoutRequested event,
     Emitter<AuthState> emit,
   ) async {
-    // 1. Disconnect Google Sign-In completely so user can select account next time
+    // Tear down tracking before dropping the credentials, so the final
+    // presence write and the FCM token removal still authenticate.
+    try {
+      final bgService = BackgroundLocationService();
+      await bgService.stop();
+      await bgService.clearUser();
+    } catch (e) {
+      debugPrint('Logout: failed to stop background service: $e');
+    }
+
+    // Without these the singletons keep the previous user's Firestore and
+    // Realtime Database listeners attached across the next sign-in.
+    try {
+      await LocationService().reset();
+    } catch (e) {
+      debugPrint('Logout: failed to reset location service: $e');
+    }
+
+    try {
+      await FamilyService().reset();
+    } catch (e) {
+      debugPrint('Logout: failed to reset family service: $e');
+    }
+
+    try {
+      await NotificationService().onSignOut();
+    } catch (e) {
+      debugPrint('Logout: failed to clear notification state: $e');
+    }
+
+    try {
+      await LocationCacheService().clearAll();
+    } catch (e) {
+      debugPrint('Logout: failed to clear cached locations: $e');
+    }
+
     try {
       await _googleSignIn.disconnect();
     } catch (_) {}
@@ -141,20 +181,13 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
     try {
       await _auth.signOut();
     } catch (_) {}
-    
-    // 2. Stop background service and clear cached identity
-    try {
-      final bgService = BackgroundLocationService();
-      await bgService.stop();
-      await bgService.clearUser();
-    } catch (_) {}
-    
-    // 3. Clear all SharedPreferences to reset onboarding and permissions state
+
+    // Reset onboarding and permission flags for the next account.
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.clear();
     } catch (_) {}
-      
+
     emit(AuthUnauthenticated());
   }
 }

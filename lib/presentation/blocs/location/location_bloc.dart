@@ -171,7 +171,9 @@ class LocationBloc extends Bloc<LocationEvent, LocationState> {
   Future<void> close() {
     _locationSubscription?.cancel();
     _familyLocationSubscription?.cancel();
-    _locationService.dispose();
+    // Only stop this bloc's tracking. Disposing the shared LocationService
+    // singleton here would close a stream other screens still listen to.
+    _locationService.stopTracking();
     return super.close();
   }
 }

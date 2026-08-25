@@ -61,26 +61,23 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
           break;
 
         case 1:
-          // Request location permission (foreground first)
-          PermissionStatus locationStatus = await Permission.location.request();
-          if (locationStatus.isGranted) {
-            // Request background location
-            final bgStatus = await Permission.locationAlways.request();
-            granted = bgStatus.isGranted || locationStatus.isGranted;
-            
-            if (granted) {
-              // Initialize background location service
-              try {
-                final bgService = BackgroundLocationService();
-                await bgService.start();
-                // Configure with current user
-                final user = FirebaseAuth.instance.currentUser;
-                if (user != null) {
-                  await bgService.setUserId(user.uid);
-                }
-              } catch (e) {
-                debugPrint('BackgroundLocationService init error: $e');
+          // Android requires two separate prompts: foreground access first,
+          // then "allow all the time". Asking for both at once silently fails.
+          granted = await LocationPermissionHelper.requestBackgroundPermission();
+          if (!granted) {
+            granted = await LocationPermissionHelper.hasAllPermissions();
+          }
+
+          if (granted) {
+            try {
+              final bgService = BackgroundLocationService();
+              await bgService.start();
+              final user = FirebaseAuth.instance.currentUser;
+              if (user != null) {
+                await bgService.setUserId(user.uid);
               }
+            } catch (e) {
+              debugPrint('BackgroundLocationService init error: $e');
             }
           }
           break;

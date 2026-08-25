@@ -1,10 +1,13 @@
 import 'dart:async';
 import 'dart:math';
+import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 import '../data/models/location_model.dart';
 import '../data/models/geofence_model.dart';
+import '../services/background_service.dart';
+import '../services/location_service.dart';
 import '../services/notification_service.dart';
 
 /// Family Service
@@ -22,8 +25,10 @@ class FamilyService {
   String? _currentFamilyId;
   StreamSubscription? _familySubscription;
   StreamSubscription? _sosSubscription;
+  StreamSubscription? _membersFeedSubscription;
   bool _isFirstFamilyLoad = true;
   final _familyMembersController = StreamController<List<FamilyMemberData>>.broadcast();
+  final Map<String, _FamilyMembersFeed> _memberFeeds = {};
 
   /// Stream of family members with their locations
   Stream<List<FamilyMemberData>> get familyMembersStream => _familyMembersController.stream;
@@ -51,6 +56,7 @@ class FamilyService {
       
       if (_currentFamilyId != null) {
         _startListeningToFamily();
+        await _syncTrackingServices(_currentFamilyId!);
       }
     } else {
       // Create user document if it doesn't exist
@@ -132,6 +138,7 @@ class FamilyService {
 
     _currentFamilyId = familyRef.id;
     _startListeningToFamily();
+    await _syncTrackingServices(familyRef.id);
 
     return familyRef.id;
   }
@@ -165,6 +172,73 @@ class FamilyService {
     return families;
   }
 
+  /// Every family the signed-in user belongs to.
+  Future<List<String>> getUserFamilyIds() async {
+    final user = _auth.currentUser;
+    if (user == null) return [];
+    final userDoc = await _firestore.collection('users').doc(user.uid).get();
+    return List<String>.from(userDoc.data()?['familyIds'] ?? const []);
+  }
+
+  /// Point the tracking services at the active nest.
+  ///
+  /// Every path that changes which family is active funnels through here, so
+  /// the background tracker can never keep publishing to the previous nest's
+  /// key while the UI reads a different one.
+  Future<void> _syncTrackingServices(String familyId) async {
+    final user = _auth.currentUser;
+    if (user == null) return;
+
+    var effectiveIds = <String>[familyId];
+    try {
+      final allFamilyIds = await getUserFamilyIds();
+      if (allFamilyIds.isNotEmpty) effectiveIds = allFamilyIds;
+    } catch (e) {
+      debugPrint('Failed to read family list: $e');
+    }
+
+    await _publishMembershipIndex(user.uid, effectiveIds);
+
+    try {
+      await BackgroundLocationService().configureForUser(
+        userId: user.uid,
+        familyId: familyId,
+        allFamilyIds: effectiveIds,
+      );
+    } catch (e) {
+      debugPrint('Failed to configure background tracking: $e');
+    }
+
+    try {
+      await LocationService().initialize(
+        userId: user.uid,
+        familyId: familyId,
+      );
+    } catch (e) {
+      debugPrint('Failed to initialize foreground tracking: $e');
+    }
+  }
+
+  /// Mirror membership into Realtime Database.
+  ///
+  /// The database rules scope reads of `locations`, `locationHistory` and
+  /// `sos_active` to `family_members/{familyId}/{uid}`, and RTDB rules cannot
+  /// query Firestore. A Cloud Function maintains this index for new members;
+  /// writing it here as well keeps members who joined before that function
+  /// existed from losing access.
+  Future<void> _publishMembershipIndex(
+    String userId,
+    List<String> familyIds,
+  ) async {
+    for (final id in familyIds) {
+      try {
+        await _database.ref('family_members/$id/$userId').set(true);
+      } catch (e) {
+        debugPrint('Failed to index membership for $id: $e');
+      }
+    }
+  }
+
   /// Switch the active family
   Future<void> switchFamily(String familyId) async {
     final user = _auth.currentUser;
@@ -176,6 +250,7 @@ class FamilyService {
 
     _currentFamilyId = familyId;
     _startListeningToFamily();
+    await _syncTrackingServices(familyId);
   }
 
   /// Join a family with invite code
@@ -250,6 +325,7 @@ class FamilyService {
 
     _currentFamilyId = familyId;
     _startListeningToFamily();
+    await _syncTrackingServices(familyId);
 
     return true;
   }
@@ -283,151 +359,87 @@ class FamilyService {
 
   /// Start listening to family members
   void _startListeningToFamily() {
-    if (_currentFamilyId == null) return;
+    final familyId = _currentFamilyId;
+    if (familyId == null) return;
 
     _familySubscription?.cancel();
     _sosSubscription?.cancel();
+    _membersFeedSubscription?.cancel();
     _isFirstFamilyLoad = true;
-    
-    // Listen to family members from Firestore
+
+    // Roster changes drive join/removal notifications only; the member data
+    // itself comes from the live feed below.
     _familySubscription = _firestore
         .collection('families')
-        .doc(_currentFamilyId)
+        .doc(familyId)
         .collection('members')
         .snapshots()
         .listen((snapshot) async {
-          // Check for member added/removed to trigger notifications
-          if (!_isFirstFamilyLoad) {
-            for (var change in snapshot.docChanges) {
-              if (change.type == DocumentChangeType.added) {
-                final data = change.doc.data();
-                if (data != null && data['userId'] != currentUserId) {
-                  final familyInfo = await getCurrentFamilyInfo();
-                  final name = familyInfo?.familyName ?? 'the nest';
-                  NotificationService().showMemberJoinedNotification(
-                    userName: data['displayName'] ?? 'A member',
-                    familyName: name,
-                  );
-                }
-              } else if (change.type == DocumentChangeType.removed) {
-                final data = change.doc.data();
-                if (data != null && data['userId'] == currentUserId) {
-                  final familyInfo = await getCurrentFamilyInfo();
-                  final name = familyInfo?.familyName ?? 'the nest';
-                  NotificationService().showRemovedFromFamilyNotification(
-                    familyName: name,
-                  );
-                  _handleSelfRemovedFromFamily();
-                }
-              }
-            }
-          }
-          _isFirstFamilyLoad = false;
-
-          final members = <FamilyMemberData>[];
-          
-          for (final doc in snapshot.docs) {
-            final data = doc.data();
-            final memberId = doc.id;
-            final isCurrent = memberId == currentUserId;
-            
-            String memberName = data['displayName'] ?? 'Unknown';
-            String? memberPhone = data['phone'] ?? data['phoneNumber'];
-            
-            // Self-healing and fetch latest profile data
-            try {
-              final userDoc = await _firestore.collection('users').doc(memberId).get();
-              if (userDoc.exists) {
-                final userData = userDoc.data()!;
-                final profileName = userData['displayName'] ?? userData['name'];
-                final profilePhone = userData['phone'] ?? userData['phoneNumber'];
-                
-                if (profilePhone != null && profilePhone.toString().isNotEmpty) {
-                  memberPhone = profilePhone;
-                }
-                
-                if (profileName != null) {
-                  memberName = profileName;
-                  // Self-healing: if this is the current user, ensure family member name matches profile name
-                  if (isCurrent && profileName != (data['displayName'] ?? '')) {
-                    doc.reference.update({'displayName': profileName}).catchError((_) {});
-                  }
-                }
-              }
-            } catch (_) {}
-            
-            // Get real-time location from Realtime Database
-            LocationModel? location;
-            try {
-              final locationSnapshot = await _database
-                  .ref('locations/$_currentFamilyId/$memberId')
-                  .get();
-              
-              if (locationSnapshot.exists) {
-                final locData = locationSnapshot.value as Map<dynamic, dynamic>;
-                location = LocationModel.fromRealtimeDb(locData, memberId);
-              }
-            } catch (e) {
-              // Location not available
-            }
-
-            // Check presence node for online status (independent of GPS)
-            bool memberOnline = false;
-            try {
-              final presenceSnapshot = await _database
-                  .ref('presence/$memberId')
-                  .get();
-              if (presenceSnapshot.exists) {
-                final presData = presenceSnapshot.value as Map<dynamic, dynamic>;
-                final isPresenceOnline = presData['online'] == true;
-                final lastSeenMs = presData['lastSeen'] as int?;
-                if (isPresenceOnline && lastSeenMs != null) {
-                  final lastSeenTime = DateTime.fromMillisecondsSinceEpoch(lastSeenMs);
-                  memberOnline = DateTime.now().difference(lastSeenTime).inMinutes < 5;
-                }
-              }
-            } catch (_) {}
-            // Fallback: also consider online if location timestamp is very recent
-            if (!memberOnline) {
-              memberOnline = _isRecentlyActive(location?.timestamp);
-            }
-
-            members.add(FamilyMemberData(
-              id: memberId,
-              displayName: memberName,
-              photoUrl: data['photoUrl'],
-              role: data['role'] ?? 'member',
-              isOnline: memberOnline,
-              location: location,
-              battery: location?.battery ?? 100,
-              isCurrentUser: isCurrent,
-              phone: memberPhone,
-            ));
+          if (_isFirstFamilyLoad) {
+            _isFirstFamilyLoad = false;
+            return;
           }
 
-          _familyMembersController.add(members);
+          for (final change in snapshot.docChanges) {
+            final data = change.doc.data();
+            if (data == null) continue;
+
+            if (change.type == DocumentChangeType.added &&
+                data['userId'] != currentUserId) {
+              final familyInfo = await getCurrentFamilyInfo();
+              NotificationService().showMemberJoinedNotification(
+                userName: data['displayName'] ?? 'A member',
+                familyName: familyInfo?.familyName ?? 'the nest',
+              );
+            } else if (change.type == DocumentChangeType.removed &&
+                data['userId'] == currentUserId) {
+              final familyInfo = await getCurrentFamilyInfo();
+              NotificationService().showRemovedFromFamilyNotification(
+                familyName: familyInfo?.familyName ?? 'the nest',
+              );
+              _handleSelfRemovedFromFamily();
+            }
+          }
         });
 
-    // Listen for active SOS events for this family
+    _membersFeedSubscription =
+        getFamilyMembersStream(familyId).listen(_familyMembersController.add);
+
+    // Listen for active SOS events for this family.
+    //
+    // The previous version filtered on `createdAt > Timestamp.now()`, captured
+    // when the listener attached, so a server timestamp could never satisfy it
+    // and no alert ever fired. Filter by recency instead and drop anything the
+    // listener has already reported.
+    final since = Timestamp.fromDate(
+      DateTime.now().subtract(const Duration(hours: 1)),
+    );
+    final announcedSosIds = <String>{};
+
     _sosSubscription = _firestore
         .collection('sos_events')
-        .where('familyId', isEqualTo: _currentFamilyId)
+        .where('familyId', isEqualTo: familyId)
         .where('status', isEqualTo: 'active')
-        .where('createdAt', isGreaterThan: Timestamp.now())
+        .where('createdAt', isGreaterThan: since)
         .snapshots()
         .listen((snapshot) {
-          for (var change in snapshot.docChanges) {
-            if (change.type == DocumentChangeType.added) {
-              final data = change.doc.data();
-              if (data != null && data['userId'] != currentUserId) {
-                NotificationService().showSOSNotification(
-                  userName: data['userName'] ?? 'A member',
-                  eventId: change.doc.id,
-                  latitude: data['triggerLocation']?['latitude'] ?? 0.0,
-                  longitude: data['triggerLocation']?['longitude'] ?? 0.0,
-                );
-              }
-            }
+          for (final change in snapshot.docChanges) {
+            if (change.type != DocumentChangeType.added) continue;
+
+            final data = change.doc.data();
+            if (data == null || data['userId'] == currentUserId) continue;
+            if (!announcedSosIds.add(change.doc.id)) continue;
+
+            NotificationService().showSOSNotification(
+              userName: data['userName'] ?? 'A member',
+              eventId: change.doc.id,
+              latitude: (data['triggerLocation']?['latitude'] as num?)
+                      ?.toDouble() ??
+                  0.0,
+              longitude: (data['triggerLocation']?['longitude'] as num?)
+                      ?.toDouble() ??
+                  0.0,
+            );
           }
         });
   }
@@ -604,7 +616,7 @@ class FamilyService {
 
       return history;
     } catch (e) {
-      print('Error fetching location history: $e');
+      debugPrint('Error fetching location history: $e');
       return [];
     }
   }
@@ -724,37 +736,58 @@ class FamilyService {
       }
     }
 
+    final remaining = (await getUserFamilyIds())
+        .where((id) => id != familyId)
+        .toList();
+    final nextFamilyId = remaining.isEmpty ? null : remaining.first;
+
     try {
-      // Remove family from user's familyIds
       await _firestore.collection('users').doc(user.uid).update({
         'familyIds': FieldValue.arrayRemove([familyId]),
-        'currentFamilyId': null,
+        'currentFamilyId': nextFamilyId,
       });
 
-      // Remove user's location data
       await _database.ref('locations/$familyId/${user.uid}').remove();
+      await _database.ref('locationHistory/$familyId/${user.uid}').remove();
+      await _database.ref('family_members/$familyId/${user.uid}').remove();
     } catch (e) {
-      // Best effort cleanup
+      debugPrint('Best-effort cleanup after leaving $familyId failed: $e');
     }
 
-    // Stop listening and clear current family
     _familySubscription?.cancel();
     _sosSubscription?.cancel();
-    _currentFamilyId = null;
+    _currentFamilyId = nextFamilyId;
+
+    // Leaving the last nest has to stop the tracker, otherwise it keeps
+    // publishing to a nest the user is no longer part of.
+    if (nextFamilyId == null) {
+      await BackgroundLocationService().clearUser();
+      await BackgroundLocationService().stop();
+      await LocationService().reset();
+    } else {
+      _startListeningToFamily();
+      await _syncTrackingServices(nextFamilyId);
+    }
   }
 
   /// Remove a member from the family (admin only)
+  ///
+  /// Only the membership document is deleted here. Detaching the family from
+  /// the other user's profile and wiping their Realtime Database location is
+  /// done by the `onMemberRemoved` Cloud Function, because the security rules
+  /// deliberately stop one user from writing another user's data.
   Future<void> removeMemberFromFamily(String familyId, String memberId) async {
     final user = _auth.currentUser;
     if (user == null) throw Exception('User not authenticated');
 
-    // Check if user is admin
-    final familyDoc = await _firestore.collection('families').doc(familyId).get();
-    if (familyDoc.data()?['createdBy'] != user.uid) {
-      throw Exception('Only the family admin can remove members');
+    if (memberId == user.uid) {
+      throw Exception('Use "Leave nest" to remove yourself');
     }
 
-    // Remove user from family members subcollection
+    if (!await _isFamilyAdmin(familyId, user.uid)) {
+      throw Exception('Only a nest admin can remove members');
+    }
+
     await _firestore
         .collection('families')
         .doc(familyId)
@@ -762,25 +795,23 @@ class FamilyService {
         .doc(memberId)
         .delete();
 
-    // Remove user from family memberIds array
     await _firestore.collection('families').doc(familyId).update({
       'memberIds': FieldValue.arrayRemove([memberId]),
     });
+  }
 
-    // Remove family from user's familyIds array and clear currentFamilyId if needed
-    final userDoc = await _firestore.collection('users').doc(memberId).get();
-    if (userDoc.exists) {
-      final updates = <String, dynamic>{
-        'familyIds': FieldValue.arrayRemove([familyId]),
-      };
-      if (userDoc.data()?['currentFamilyId'] == familyId) {
-        updates['currentFamilyId'] = null;
-      }
-      await _firestore.collection('users').doc(memberId).update(updates);
-    }
+  /// True when [userId] created the family or holds the admin role.
+  Future<bool> _isFamilyAdmin(String familyId, String userId) async {
+    final familyDoc = await _firestore.collection('families').doc(familyId).get();
+    if (familyDoc.data()?['createdBy'] == userId) return true;
 
-    // Remove user's location data
-    await _database.ref('locations/$familyId/$memberId').remove();
+    final memberDoc = await _firestore
+        .collection('families')
+        .doc(familyId)
+        .collection('members')
+        .doc(userId)
+        .get();
+    return memberDoc.data()?['role'] == 'admin';
   }
 
   /// Delete the current family (admin only)
@@ -799,18 +830,9 @@ class FamilyService {
           throw Exception('Only the family admin can delete the family');
         }
 
-        // Get all member IDs
-        final memberIds = List<String>.from(familyDoc.data()?['memberIds'] ?? []);
-
-        // Remove family from all members' familyIds
-        for (final memberId in memberIds) {
-          await _firestore.collection('users').doc(memberId).update({
-            'familyIds': FieldValue.arrayRemove([familyId]),
-            'currentFamilyId': null,
-          });
-        }
-
-        // Delete all members in subcollection
+        // Detaching every other member's profile and clearing the Realtime
+        // Database subtree is the `onFamilyDeleted` Cloud Function's job; the
+        // rules stop a client from touching another user's documents.
         final membersSnapshot = await _firestore
             .collection('families')
             .doc(familyId)
@@ -820,11 +842,7 @@ class FamilyService {
           await doc.reference.delete();
         }
 
-        // Delete the family document
         await _firestore.collection('families').doc(familyId).delete();
-
-        // Delete location data
-        await _database.ref('locations/$familyId').remove();
       }
     } on FirebaseException catch (e) {
       if (e.code != 'permission-denied' && e.code != 'not-found') {
@@ -898,94 +916,23 @@ class FamilyService {
     );
   }
   
-  /// Get family members stream by family ID (for external use)
+  /// Live stream of a family's members, including their current positions.
+  ///
+  /// Merges the Firestore roster with the Realtime Database `locations/` and
+  /// `presence/` nodes, so a member moving emits a new list immediately.
+  /// Previously this only listened to Firestore and read locations once per
+  /// roster change, which left map markers frozen until the app restarted.
   Stream<List<FamilyMemberData>> getFamilyMembersStream(String familyId) {
-    return _firestore
-        .collection('families')
-        .doc(familyId)
-        .collection('members')
-        .snapshots()
-        .asyncMap((snapshot) async {
-          final members = <FamilyMemberData>[];
-          
-          for (final doc in snapshot.docs) {
-            final data = doc.data();
-            final memberId = doc.id;
-            
-            // Get real-time location from Realtime Database
-            LocationModel? location;
-            try {
-              final locationSnapshot = await _database
-                  .ref('locations/$familyId/$memberId')
-                  .get();
-              
-              if (locationSnapshot.exists) {
-                final locData = locationSnapshot.value as Map<dynamic, dynamic>;
-                location = LocationModel.fromRealtimeDb(locData, memberId);
-              }
-            } catch (e) {
-              // Location not available
-            }
+    final existing = _memberFeeds[familyId];
+    if (existing != null) return existing.stream;
 
-            String memberName = data['displayName'] ?? 'Unknown';
-            String? memberPhone = data['phone'] ?? data['phoneNumber'];
-            
-            // Fetch user profile from Firestore to get their real name and phone
-            try {
-              final userDoc = await _firestore.collection('users').doc(memberId).get();
-              if (userDoc.exists) {
-                final userData = userDoc.data()!;
-                final profileName = userData['displayName'] ?? userData['name'];
-                final profilePhone = userData['phone'] ?? userData['phoneNumber'];
-                
-                if (profilePhone != null && profilePhone.toString().isNotEmpty) {
-                  memberPhone = profilePhone;
-                }
-                
-                if (profileName != null) {
-                  memberName = profileName;
-                  if (memberId == currentUserId && profileName != (data['displayName'] ?? '')) {
-                    doc.reference.update({'displayName': profileName}).catchError((_) {});
-                  }
-                }
-              }
-            } catch (_) {}
-
-            // Check presence node for online status
-            bool memberOnline = false;
-            try {
-              final presenceSnapshot = await _database
-                  .ref('presence/$memberId')
-                  .get();
-              if (presenceSnapshot.exists) {
-                final presData = presenceSnapshot.value as Map<dynamic, dynamic>;
-                final isPresenceOnline = presData['online'] == true;
-                final lastSeenMs = presData['lastSeen'] as int?;
-                if (isPresenceOnline && lastSeenMs != null) {
-                  final lastSeenTime = DateTime.fromMillisecondsSinceEpoch(lastSeenMs);
-                  memberOnline = DateTime.now().difference(lastSeenTime).inMinutes < 5;
-                }
-              }
-            } catch (_) {}
-            if (!memberOnline) {
-              memberOnline = _isRecentlyActive(location?.timestamp);
-            }
-
-            members.add(FamilyMemberData(
-              id: memberId,
-              displayName: memberName,
-              photoUrl: data['photoUrl'],
-              role: data['role'] ?? 'member',
-              isOnline: memberOnline,
-              location: location,
-              battery: location?.battery ?? 100,
-              isCurrentUser: memberId == currentUserId,
-              phone: memberPhone,
-            ));
-          }
-
-          return members;
-        });
+    final feed = _FamilyMembersFeed(
+      familyId: familyId,
+      service: this,
+      onDisposed: () => _memberFeeds.remove(familyId),
+    );
+    _memberFeeds[familyId] = feed;
+    return feed.stream;
   }
 
   // ==========================================
@@ -1034,11 +981,236 @@ class FamilyService {
         .delete();
   }
 
-  /// Dispose
-  void dispose() {
-    _familySubscription?.cancel();
-    _familyMembersController.close();
+  /// Tear down all listeners for the signed-in user.
+  ///
+  /// Called on sign-out so a new session does not inherit the previous user's
+  /// family listeners.
+  Future<void> reset() async {
+    await _familySubscription?.cancel();
+    await _sosSubscription?.cancel();
+    await _membersFeedSubscription?.cancel();
+    _familySubscription = null;
+    _sosSubscription = null;
+    _membersFeedSubscription = null;
+
+    for (final feed in _memberFeeds.values.toList()) {
+      await feed.close();
+    }
+    _memberFeeds.clear();
+
+    _currentFamilyId = null;
+    _isFirstFamilyLoad = true;
   }
+
+  /// Dispose
+  Future<void> dispose() async {
+    await reset();
+    if (!_familyMembersController.isClosed) {
+      await _familyMembersController.close();
+    }
+  }
+}
+
+/// Live view of one family's members.
+///
+/// Keeps three Realtime Database / Firestore sources in sync and emits a fresh
+/// list whenever any of them changes:
+///  * Firestore `families/{id}/members` — the roster, roles and photos
+///  * Realtime Database `locations/{familyId}` — every member's position
+///  * Realtime Database `presence/{uid}` — online state while stationary
+///
+/// User profiles are cached per member so a position update does not trigger a
+/// Firestore read for every member in the nest.
+class _FamilyMembersFeed {
+  _FamilyMembersFeed({
+    required this.familyId,
+    required this.service,
+    required this.onDisposed,
+  }) {
+    _controller = StreamController<List<FamilyMemberData>>.broadcast(
+      onListen: _start,
+      onCancel: _stopWhenIdle,
+    );
+  }
+
+  final String familyId;
+  final FamilyService service;
+  final VoidCallback onDisposed;
+
+  late final StreamController<List<FamilyMemberData>> _controller;
+  StreamSubscription? _rosterSub;
+  StreamSubscription? _locationsSub;
+  final Map<String, StreamSubscription> _presenceSubs = {};
+
+  final Map<String, Map<String, dynamic>> _roster = {};
+  final Map<String, LocationModel> _locations = {};
+  final Map<String, bool> _presenceOnline = {};
+  final Map<String, _MemberProfile> _profiles = {};
+
+  bool _started = false;
+  List<FamilyMemberData> _latest = const [];
+
+  Stream<List<FamilyMemberData>> get stream => _controller.stream;
+
+  void _start() {
+    if (_started) return;
+    _started = true;
+
+    _rosterSub = service._firestore
+        .collection('families')
+        .doc(familyId)
+        .collection('members')
+        .snapshots()
+        .listen((snapshot) async {
+      _roster
+        ..clear()
+        ..addEntries(snapshot.docs.map((d) => MapEntry(d.id, d.data())));
+
+      _syncPresenceSubscriptions();
+      await _refreshProfiles(snapshot.docs);
+      _emit();
+    }, onError: (Object e) => debugPrint('Family roster stream error: $e'));
+
+    _locationsSub =
+        service._database.ref('locations/$familyId').onValue.listen((event) {
+      _locations.clear();
+      final value = event.snapshot.value;
+      if (value is Map) {
+        value.forEach((key, raw) {
+          if (raw is! Map) return;
+          final parsed =
+              LocationModel.tryFromRealtimeDb(raw, key.toString());
+          if (parsed != null) _locations[key.toString()] = parsed;
+        });
+      }
+      _emit();
+    }, onError: (Object e) => debugPrint('Family locations stream error: $e'));
+  }
+
+  void _syncPresenceSubscriptions() {
+    for (final memberId in _roster.keys) {
+      if (_presenceSubs.containsKey(memberId)) continue;
+      _presenceSubs[memberId] =
+          service._database.ref('presence/$memberId').onValue.listen((event) {
+        final value = event.snapshot.value;
+        var online = false;
+        if (value is Map && value['online'] == true) {
+          final lastSeenMs = (value['lastSeen'] as num?)?.toInt();
+          if (lastSeenMs != null) {
+            final lastSeen = DateTime.fromMillisecondsSinceEpoch(lastSeenMs);
+            // The tracker heartbeats once a minute; allow a few missed beats
+            // before calling someone offline.
+            online = DateTime.now().difference(lastSeen).inMinutes < 5;
+          }
+        }
+        _presenceOnline[memberId] = online;
+        _emit();
+      }, onError: (Object e) => debugPrint('Presence stream error: $e'));
+    }
+
+    for (final memberId in _presenceSubs.keys.toList()) {
+      if (_roster.containsKey(memberId)) continue;
+      _presenceSubs.remove(memberId)?.cancel();
+      _presenceOnline.remove(memberId);
+      _profiles.remove(memberId);
+    }
+  }
+
+  Future<void> _refreshProfiles(
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
+  ) async {
+    for (final doc in docs) {
+      if (_profiles.containsKey(doc.id)) continue;
+      try {
+        final userDoc =
+            await service._firestore.collection('users').doc(doc.id).get();
+        if (!userDoc.exists) continue;
+
+        final userData = userDoc.data()!;
+        final name = userData['displayName'] ?? userData['name'];
+        final phone = userData['phone'] ?? userData['phoneNumber'];
+        _profiles[doc.id] = _MemberProfile(
+          displayName: name?.toString(),
+          phone: phone?.toString(),
+          photoUrl: userData['photoUrl']?.toString(),
+        );
+
+        // Self-healing: keep the roster entry in step with the profile name.
+        if (doc.id == service.currentUserId &&
+            name != null &&
+            name != (doc.data()['displayName'] ?? '')) {
+          doc.reference.update({'displayName': name}).catchError((_) {});
+        }
+      } catch (_) {
+        // Profile is optional; the roster entry still renders.
+      }
+    }
+  }
+
+  void _emit() {
+    if (_controller.isClosed) return;
+
+    final members = <FamilyMemberData>[];
+    for (final entry in _roster.entries) {
+      final memberId = entry.key;
+      final data = entry.value;
+      final profile = _profiles[memberId];
+      final location = _locations[memberId];
+
+      final online = _presenceOnline[memberId] == true ||
+          service._isRecentlyActive(location?.timestamp);
+
+      members.add(FamilyMemberData(
+        id: memberId,
+        displayName: profile?.displayName ??
+            data['displayName']?.toString() ??
+            'Unknown',
+        photoUrl: data['photoUrl']?.toString() ?? profile?.photoUrl,
+        role: data['role']?.toString() ?? 'member',
+        isOnline: online,
+        location: location,
+        // Only claim a battery level when a real reading exists, otherwise the
+        // UI shows a confident "100%" for members who never reported.
+        battery: location?.battery ?? 0,
+        isCurrentUser: memberId == service.currentUserId,
+        phone: profile?.phone ?? data['phone']?.toString() ??
+            data['phoneNumber']?.toString(),
+      ));
+    }
+
+    members.sort((a, b) {
+      if (a.isCurrentUser != b.isCurrentUser) return a.isCurrentUser ? -1 : 1;
+      return a.displayName.toLowerCase().compareTo(b.displayName.toLowerCase());
+    });
+
+    _latest = members;
+    _controller.add(_latest);
+  }
+
+  void _stopWhenIdle() {
+    if (_controller.hasListener) return;
+    close();
+  }
+
+  Future<void> close() async {
+    await _rosterSub?.cancel();
+    await _locationsSub?.cancel();
+    for (final sub in _presenceSubs.values) {
+      await sub.cancel();
+    }
+    _presenceSubs.clear();
+    _started = false;
+    onDisposed();
+    if (!_controller.isClosed) await _controller.close();
+  }
+}
+
+class _MemberProfile {
+  final String? displayName;
+  final String? phone;
+  final String? photoUrl;
+
+  const _MemberProfile({this.displayName, this.phone, this.photoUrl});
 }
 
 /// Family member data with location

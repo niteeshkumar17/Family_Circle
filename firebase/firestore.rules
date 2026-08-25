@@ -160,9 +160,10 @@ service cloud.firestore {
       // Users can only read their own notifications
       allow read: if isOwner(userId);
       
-      // Cloud functions create notifications (service account)
-      // Users can mark as read
-      allow create: if isAuthenticated();
+      // Cloud Functions use the admin SDK and bypass these rules. Clients may
+      // only write into their own inbox, otherwise anyone could push fake
+      // alerts (including SOS) into another member's notification list.
+      allow create: if isOwner(userId);
       
       // Users can update (mark as read) their notifications
       allow update: if isOwner(userId);
@@ -172,6 +173,8 @@ service cloud.firestore {
     }
     
     // ============== LOCATION HISTORY COLLECTION ==============
+    // Live history is kept in Realtime Database; this collection only exists
+    // for exports written by the owning device.
     
     match /location_history/{userId}/{date}/{docId} {
       // Only the owner and family admins can read location history

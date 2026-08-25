@@ -46,22 +46,44 @@ class LocationModel {
 
   Map<String, dynamic> toJson() => _$LocationModelToJson(this);
 
-  factory LocationModel.fromRealtimeDb(Map<dynamic, dynamic> data, String oderId) {
+  /// Parse a Realtime Database node.
+  ///
+  /// Returns null for nodes that are missing coordinates rather than throwing,
+  /// so one malformed member cannot take down the whole family stream.
+  static LocationModel? tryFromRealtimeDb(
+    Map<dynamic, dynamic> data,
+    String userId,
+  ) {
+    final lat = data['latitude'];
+    final lng = data['longitude'];
+    if (lat is! num || lng is! num) return null;
+
     return LocationModel(
-      userId: oderId,
-      latitude: (data['latitude'] as num).toDouble(),
-      longitude: (data['longitude'] as num).toDouble(),
+      userId: userId,
+      latitude: lat.toDouble(),
+      longitude: lng.toDouble(),
       accuracy: (data['accuracy'] as num?)?.toDouble() ?? 0,
       altitude: (data['altitude'] as num?)?.toDouble(),
       speed: (data['speed'] as num?)?.toDouble(),
       heading: (data['heading'] as num?)?.toDouble(),
       address: data['address'] as String?,
-      batteryLevel: data['battery'] as int? ?? 100,
+      batteryLevel: (data['battery'] as num?)?.toInt() ?? 100,
       isCharging: data['isCharging'] as bool? ?? false,
       networkStatus: data['networkStatus'] as String? ?? 'unknown',
-      timestamp: DateTime.fromMillisecondsSinceEpoch(data['timestamp'] as int),
+      timestamp: DateTime.fromMillisecondsSinceEpoch(
+        (data['timestamp'] as num?)?.toInt() ??
+            DateTime.now().millisecondsSinceEpoch,
+      ),
       isActive: data['isActive'] as bool? ?? true,
     );
+  }
+
+  factory LocationModel.fromRealtimeDb(Map<dynamic, dynamic> data, String oderId) {
+    final parsed = tryFromRealtimeDb(data, oderId);
+    if (parsed == null) {
+      throw const FormatException('Location node is missing coordinates');
+    }
+    return parsed;
   }
 
   Map<String, dynamic> toRealtimeDb() {

@@ -6,7 +6,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../../config/theme_config.dart';
+import '../../../services/background_service.dart';
 import '../../../services/family_service.dart';
+import '../../../services/location_service.dart';
 
 class SosScreen extends StatefulWidget {
   const SosScreen({super.key});
@@ -97,19 +99,28 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
 
   Future<void> _triggerSOS() async {
     HapticFeedback.heavyImpact();
-    setState(() {
-      _isConfirming = false;
-      _isSOSActive = true;
-    });
+    setState(() => _isConfirming = false);
 
-    // Start duration timer
+    // Switch the tracker to its 5 second emergency interval before anything
+    // else, so responders get live movement even if the write below is slow.
+    BackgroundLocationService().enableSOSMode();
+
+    final sent = await _sendSOSToFamily();
+
+    if (!mounted) return;
+
+    if (!sent) {
+      // Never leave the screen claiming an alert is live when no event exists.
+      BackgroundLocationService().disableSOSMode();
+      return;
+    }
+
+    setState(() => _isSOSActive = true);
     _startDurationTimer();
-
-    // Send SOS notification to all family members
-    await _sendSOSToFamily();
   }
 
-  Future<void> _sendSOSToFamily() async {
+  /// Creates the SOS event. Returns false when the family was not notified.
+  Future<bool> _sendSOSToFamily() async {
     final familyId = await _familyService.getCurrentUserFamilyId();
     final userId = _familyService.currentUserId;
 
@@ -119,15 +130,7 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
           const SnackBar(content: Text('Unable to send SOS: missing family or user')),
         );
       }
-      return;
-    }
-
-    FamilyMemberData? currentMember;
-    for (final member in _familyMembers) {
-      if (member.id == userId) {
-        currentMember = member;
-        break;
-      }
+      return false;
     }
 
     final payload = <String, dynamic>{
@@ -138,16 +141,13 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
       'status': 'active',
     };
 
-    if (currentMember?.latitude != null && currentMember?.longitude != null) {
-      payload['triggerLocation'] = {
-        'latitude': currentMember!.latitude,
-        'longitude': currentMember.longitude,
-      };
-    }
+    final coordinates = await _resolveTriggerLocation(userId);
+    if (coordinates != null) payload['triggerLocation'] = coordinates;
 
     try {
       final eventRef = await _firestore.collection('sos_events').add(payload);
       _activeSosEventId = eventRef.id;
+      return true;
     } catch (e) {
       debugPrint('Failed to create SOS event: $e');
       if (mounted) {
@@ -155,6 +155,33 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
           const SnackBar(content: Text('Failed to notify family. Please call emergency services.')),
         );
       }
+      return false;
+    }
+  }
+
+  /// Prefer a fresh fix so responders get where the user is now, not where the
+  /// last background update left them.
+  Future<Map<String, double>?> _resolveTriggerLocation(String userId) async {
+    try {
+      final position = await LocationService()
+          .getCurrentLocation()
+          .timeout(const Duration(seconds: 8));
+      return {
+        'latitude': position.latitude,
+        'longitude': position.longitude,
+      };
+    } catch (_) {
+      for (final member in _familyMembers) {
+        if (member.id == userId &&
+            member.latitude != null &&
+            member.longitude != null) {
+          return {
+            'latitude': member.latitude!,
+            'longitude': member.longitude!,
+          };
+        }
+      }
+      return null;
     }
   }
 
@@ -201,28 +228,19 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
     }
   }
 
-  void _cancelSOS() {
-    showDialog(
+  Future<void> _cancelSOS() async {
+    final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         title: const Text('Cancel SOS?'),
         content: const Text('Are you sure you want to cancel the SOS alert?'),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: () => Navigator.pop(dialogContext, false),
             child: const Text('No, Keep Active'),
           ),
           ElevatedButton(
-            onPressed: () {
-              Navigator.pop(context);
-              setState(() {
-                _isSOSActive = false;
-                _duration = Duration.zero;
-              });
-              _durationTimer?.cancel();
-              unawaited(_closeActiveSosEvent());
-              Navigator.pop(context);
-            },
+            onPressed: () => Navigator.pop(dialogContext, true),
             style: ElevatedButton.styleFrom(
               backgroundColor: AppTheme.errorColor,
             ),
@@ -231,6 +249,19 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
         ],
       ),
     );
+
+    if (confirmed != true || !mounted) return;
+
+    _durationTimer?.cancel();
+    BackgroundLocationService().disableSOSMode();
+    setState(() {
+      _isSOSActive = false;
+      _duration = Duration.zero;
+    });
+
+    await _closeActiveSosEvent();
+
+    if (mounted) Navigator.pop(context);
   }
 
   String _formatDuration(Duration duration) {
@@ -515,12 +546,20 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
                         style: TextStyle(color: Colors.grey),
                       )
                     else
-                      ..._familyMembers.map((member) => _buildResponseItem(
-                        member.name,
-                        member.isOnline ? 'Notified' : 'Pending...',
-                        member.isOnline ? Icons.check_circle : Icons.hourglass_empty,
-                        member.isOnline ? Colors.green : Colors.orange,
-                      )),
+                      // Online only tells us the member's device is reachable,
+                      // not that they have seen the alert, so say exactly that.
+                      ..._familyMembers
+                          .where((member) => !member.isCurrentUser)
+                          .map((member) => _buildResponseItem(
+                                member.name,
+                                member.isOnline
+                                    ? 'Alerted - device online'
+                                    : 'Alerted - device offline',
+                                member.isOnline
+                                    ? Icons.check_circle
+                                    : Icons.cloud_off,
+                                member.isOnline ? Colors.green : Colors.orange,
+                              )),
                   ],
                 ),
               ),
@@ -580,7 +619,7 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
             radius: 20,
             backgroundColor: color.withOpacity(0.1),
             child: Text(
-              name[0],
+              name.isEmpty ? '?' : name[0].toUpperCase(),
               style: TextStyle(color: color, fontWeight: FontWeight.bold),
             ),
           ),

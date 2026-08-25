@@ -51,15 +51,10 @@ class _SplashScreenState extends State<SplashScreen> {
         Navigator.of(context).pushReplacementNamed(AppRoutes.permissions);
         return;
       } else {
-        // Initialize services if permissions are already granted
         try {
           await NotificationService().initialize();
-          final bgService = BackgroundLocationService();
-          await bgService.start();
-          // Configure background service with user's identity
-          await bgService.setUserId(user.uid);
         } catch (e) {
-          debugPrint('Error starting services: $e');
+          debugPrint('Error starting notifications: $e');
         }
       }
 
@@ -72,14 +67,20 @@ class _SplashScreenState extends State<SplashScreen> {
         final phone = userDoc.data()?['phone']?.toString() ?? '';
         final hasCompletedSetup = userDoc.exists && phone.isNotEmpty;
         
-        // Feed familyId to background service
+        // Hand the tracker the full nest list so a user in several nests stays
+        // visible in all of them, not just the one that happens to be open.
         final familyIds = List<String>.from(userDoc.data()?['familyIds'] ?? []);
-        if (familyIds.isNotEmpty) {
-          final activeFamilyId = userDoc.data()?['currentFamilyId'] ?? familyIds.first;
+        if (permissionsCompleted && familyIds.isNotEmpty) {
+          final activeFamilyId =
+              userDoc.data()?['currentFamilyId'] ?? familyIds.first;
           try {
-            await BackgroundLocationService().setFamilyId(activeFamilyId);
+            await BackgroundLocationService().configureForUser(
+              userId: user.uid,
+              familyId: activeFamilyId,
+              allFamilyIds: familyIds,
+            );
           } catch (e) {
-            debugPrint('Error setting family ID for bg service: $e');
+            debugPrint('Error configuring background tracking: $e');
           }
         }
 

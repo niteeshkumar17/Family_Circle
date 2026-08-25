@@ -1,18 +1,22 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:location/location.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:permission_handler/permission_handler.dart' as handler;
 import '../../../config/theme_config.dart';
 import '../../../config/routes.dart';
+import '../../../services/background_service.dart';
 import '../../../services/family_service.dart';
+import '../../../services/location_service.dart';
 import '../../../services/notification_service.dart';
 import '../../../data/models/geofence_model.dart';
+import '../../../data/models/location_model.dart';
 import '../../../data/models/notification_model.dart';
 import '../../../services/update_service.dart';
 import '../../blocs/auth/auth_bloc.dart';
@@ -412,23 +416,30 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                           style: const TextStyle(color: Colors.white54),
                         ),
                         onTap: () async {
+                          // Capture the messenger before the await so it is not
+                          // read from a context that may already be gone.
+                          final messenger = ScaffoldMessenger.of(context);
                           Navigator.pop(context); // Close sheet
                           try {
+                            // switchFamily also repoints the background tracker
+                            // and geofence listeners at the new nest.
                             await FamilyService().switchFamily(family.id);
-                            if (mounted) {
-                              setState(() {
-                                _nestKey = UniqueKey();
-                              });
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(content: Text('Switched to ${family.familyName}'), backgroundColor: AppTheme.primaryColor),
-                              );
-                            }
+                            if (!mounted) return;
+                            setState(() => _nestKey = UniqueKey());
+                            messenger.showSnackBar(
+                              SnackBar(
+                                content: Text('Switched to ${family.familyName}'),
+                                backgroundColor: AppTheme.primaryColor,
+                              ),
+                            );
                           } catch (e) {
-                            if (mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('Failed to switch nest'), backgroundColor: Colors.red),
-                              );
-                            }
+                            if (!mounted) return;
+                            messenger.showSnackBar(
+                              const SnackBar(
+                                content: Text('Failed to switch nest'),
+                                backgroundColor: Colors.red,
+                              ),
+                            );
                           }
                         },
                       );
@@ -459,124 +470,130 @@ class _MapViewContentState extends State<MapViewContent> {
   final Set<Marker> _markers = {};
   String _selectedFamilyName = "My Family"; // Current selected family
   final FamilyService _familyService = FamilyService();
+  final LocationService _locationService = LocationService();
   List<FamilyMemberData> _familyMembers = [];
+
+  StreamSubscription<List<FamilyMemberData>>? _membersSubscription;
+  StreamSubscription<LocationModel>? _myLocationSubscription;
+
+  /// The camera is auto-fitted once. Re-fitting on every position update would
+  /// yank the map back while the user is panning or zooming.
+  bool _hasFittedCamera = false;
 
   @override
   void initState() {
     super.initState();
     _getCurrentLocation();
+    _watchMyLocation();
     _loadFamilyMembers();
   }
-  
+
+  @override
+  void dispose() {
+    _membersSubscription?.cancel();
+    _myLocationSubscription?.cancel();
+    _mapController?.dispose();
+    super.dispose();
+  }
+
+  void _watchMyLocation() {
+    _myLocationSubscription = _locationService.locationStream.listen((location) {
+      if (!mounted) return;
+      setState(() {
+        _currentPosition = LatLng(location.latitude, location.longitude);
+        _isLoading = false;
+      });
+      _rebuildMarkers();
+    });
+  }
+
   Future<void> _loadFamilyMembers() async {
     final familyId = await _familyService.getCurrentUserFamilyId();
-    if (familyId != null) {
-      // Get family info for the name
-      final familyInfo = await _familyService.getFamilyInfo(familyId);
-      if (familyInfo != null && mounted) {
-        setState(() {
-          _selectedFamilyName = familyInfo.familyName;
-        });
-      }
-      
-      // Listen to family members
-      _familyService.getFamilyMembersStream(familyId).listen((members) {
-        if (mounted) {
-          setState(() {
-            _familyMembers = members;
-          });
-          _addFamilyMarkers();
-        }
-      });
+    if (familyId == null) return;
+
+    final familyInfo = await _familyService.getFamilyInfo(familyId);
+    if (familyInfo != null && mounted) {
+      setState(() => _selectedFamilyName = familyInfo.familyName);
     }
+
+    await _membersSubscription?.cancel();
+    _membersSubscription =
+        _familyService.getFamilyMembersStream(familyId).listen((members) {
+      if (!mounted) return;
+      setState(() => _familyMembers = members);
+      _rebuildMarkers();
+    });
   }
 
   Future<void> _getCurrentLocation() async {
     try {
-      final location = Location();
-      
-      bool serviceEnabled = await location.serviceEnabled();
-      if (!serviceEnabled) {
-        serviceEnabled = await location.requestService();
-        if (!serviceEnabled) {
-          setState(() => _isLoading = false);
-          return;
-        }
+      if (!await LocationPermissionHelper.requestPermissions()) {
+        if (mounted) setState(() => _isLoading = false);
+        return;
       }
 
-      PermissionStatus permission = await location.hasPermission();
-      if (permission == PermissionStatus.denied) {
-        permission = await location.requestPermission();
-        if (permission != PermissionStatus.granted) {
-          setState(() => _isLoading = false);
-          return;
-        }
-      }
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings:
+            const LocationSettings(accuracy: LocationAccuracy.high),
+      ).timeout(const Duration(seconds: 15));
 
-      final locationData = await location.getLocation();
-      if (locationData.latitude != null && locationData.longitude != null) {
-        setState(() {
-          _currentPosition = LatLng(locationData.latitude!, locationData.longitude!);
-          _isLoading = false;
-        });
-        
-        // Add current user marker
-        _markers.add(
-          Marker(
-            markerId: const MarkerId('me'),
-            position: _currentPosition,
-            infoWindow: const InfoWindow(title: 'You'),
-            icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
-          ),
-        );
-        
-        // Fit all markers including current location
-        _fitAllMarkers();
-      }
+      if (!mounted) return;
+      setState(() {
+        _currentPosition = LatLng(position.latitude, position.longitude);
+        _isLoading = false;
+      });
+      _rebuildMarkers();
     } catch (e) {
       debugPrint('Error getting location: $e');
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  void _addFamilyMarkers() {
-    // Clear existing family markers (keep only 'me' marker)
-    _markers.removeWhere((m) => m.markerId.value != 'me');
-    
-    // Add markers for real family members
+  void _rebuildMarkers() {
+    if (!mounted) return;
+
+    final markers = <Marker>{
+      Marker(
+        markerId: const MarkerId('me'),
+        position: _currentPosition,
+        infoWindow: const InfoWindow(title: 'You'),
+        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
+      ),
+    };
+
     for (final member in _familyMembers) {
-      if (member.id == _familyService.currentUserId) continue; // Skip current user
-      
-      if (member.latitude != null && member.longitude != null) {
-        _markers.add(
-          Marker(
-            markerId: MarkerId(member.id),
-            position: LatLng(member.latitude!, member.longitude!),
-            infoWindow: InfoWindow(
-              title: member.name,
-              snippet: member.isOnline ? 'Online' : 'Last seen: ${_formatLastSeen(member.lastSeen)}',
-            ),
-            icon: BitmapDescriptor.defaultMarkerWithHue(
-              member.isOnline ? BitmapDescriptor.hueGreen : BitmapDescriptor.hueOrange,
-            ),
+      if (member.isCurrentUser) continue;
+      if (member.latitude == null || member.longitude == null) continue;
+
+      markers.add(
+        Marker(
+          markerId: MarkerId(member.id),
+          position: LatLng(member.latitude!, member.longitude!),
+          infoWindow: InfoWindow(
+            title: member.name,
+            snippet: member.isOnline
+                ? (member.location?.address ?? 'Online')
+                : 'Last seen: ${member.lastSeenText}',
           ),
-        );
-      }
+          icon: BitmapDescriptor.defaultMarkerWithHue(
+            member.isOnline
+                ? BitmapDescriptor.hueGreen
+                : BitmapDescriptor.hueOrange,
+          ),
+        ),
+      );
     }
-    
-    if (mounted) {
-      setState(() {});
+
+    setState(() {
+      _markers
+        ..clear()
+        ..addAll(markers);
+    });
+
+    if (!_hasFittedCamera && _mapController != null && _markers.length > 1) {
+      _hasFittedCamera = true;
       _fitAllMarkers();
     }
-  }
-  
-  String _formatLastSeen(DateTime? lastSeen) {
-    if (lastSeen == null) return 'Unknown';
-    final diff = DateTime.now().difference(lastSeen);
-    if (diff.inMinutes < 1) return 'Just now';
-    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
-    if (diff.inHours < 24) return '${diff.inHours}h ago';
-    return '${diff.inDays}d ago';
   }
 
   void _fitAllMarkers() {
@@ -1071,6 +1088,7 @@ class FamilyListContent extends StatefulWidget {
 
 class _FamilyListContentState extends State<FamilyListContent> {
   final FamilyService _familyService = FamilyService();
+  StreamSubscription<List<FamilyMemberData>>? _membersSubscription;
   List<FamilyMemberData> _members = [];
   bool _isLoading = true;
 
@@ -1080,20 +1098,30 @@ class _FamilyListContentState extends State<FamilyListContent> {
     _loadMembers();
   }
 
+  @override
+  void dispose() {
+    _membersSubscription?.cancel();
+    super.dispose();
+  }
+
   Future<void> _loadMembers() async {
     final familyId = await _familyService.getCurrentUserFamilyId();
-    if (familyId != null) {
-      _familyService.getFamilyMembersStream(familyId).listen((members) {
-        if (mounted) {
-          setState(() {
-            _members = members;
-            _isLoading = false;
-          });
-        }
-      });
-    } else {
+    if (!mounted) return;
+
+    if (familyId == null) {
       setState(() => _isLoading = false);
+      return;
     }
+
+    await _membersSubscription?.cancel();
+    _membersSubscription =
+        _familyService.getFamilyMembersStream(familyId).listen((members) {
+      if (!mounted) return;
+      setState(() {
+        _members = members;
+        _isLoading = false;
+      });
+    });
   }
 
   @override
@@ -1152,15 +1180,6 @@ class _FamilyListContentState extends State<FamilyListContent> {
         ],
       ),
     );
-  }
-
-  String _formatLastSeen(DateTime? lastSeen) {
-    if (lastSeen == null) return 'Unknown';
-    final diff = DateTime.now().difference(lastSeen);
-    if (diff.inMinutes < 1) return 'Just now';
-    if (diff.inMinutes < 60) return '${diff.inMinutes} min ago';
-    if (diff.inHours < 24) return '${diff.inHours}h ago';
-    return '${diff.inDays}d ago';
   }
 
   Widget _buildMemberListItem(BuildContext context, int index) {
@@ -1494,17 +1513,16 @@ class _PlacesContentState extends State<PlacesContent> {
   }
 
   Widget _buildPlaceholderItem(BuildContext context, String name) {
+    // Rendered greyed out until the place is actually configured, so only the
+    // icon varies by name.
     IconData icon = Icons.location_on_rounded;
-    Color color = AppTheme.primaryColor;
-    if (name.toLowerCase().contains('home')) {
+    final lowerName = name.toLowerCase();
+    if (lowerName.contains('home')) {
       icon = Icons.home_rounded;
-      color = Colors.green;
-    } else if (name.toLowerCase().contains('office') || name.toLowerCase().contains('work')) {
+    } else if (lowerName.contains('office') || lowerName.contains('work')) {
       icon = Icons.work_rounded;
-      color = Colors.orange;
-    } else if (name.toLowerCase().contains('school')) {
+    } else if (lowerName.contains('school')) {
       icon = Icons.school_rounded;
-      color = Colors.blue;
     }
 
     return GestureDetector(
@@ -1554,7 +1572,7 @@ class _PlacesContentState extends State<PlacesContent> {
                 ],
               ),
             ),
-            Switch(
+            const Switch(
               value: false,
               onChanged: null, // Disabled switch
             ),
@@ -1578,6 +1596,20 @@ class SettingsContent extends StatefulWidget {
 class _SettingsContentState extends State<SettingsContent> {
   bool _notificationsEnabled = true;
   bool _locationSharingEnabled = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadLocationSharingPreference();
+  }
+
+  Future<void> _loadLocationSharingPreference() async {
+    final familyId = await FamilyService().getCurrentUserFamilyId();
+    if (familyId == null) return;
+    final enabled =
+        await BackgroundLocationService().isLocationSharingEnabled(familyId);
+    if (mounted) setState(() => _locationSharingEnabled = enabled);
+  }
 
   void _showProfileDialog() async {
     final user = FirebaseAuth.instance.currentUser;
@@ -1824,6 +1856,14 @@ class _SettingsContentState extends State<SettingsContent> {
     );
   }
 
+  Future<void> _applyLocationSharing(bool enabled) async {
+    final familyId = await FamilyService().getCurrentUserFamilyId();
+    if (familyId == null) return;
+    await BackgroundLocationService()
+        .setLocationSharingEnabled(familyId, enabled);
+    if (enabled) BackgroundLocationService().forceUpdate();
+  }
+
   void _showLocationSharingDialog() {
     showDialog(
       context: context,
@@ -1841,9 +1881,12 @@ class _SettingsContentState extends State<SettingsContent> {
                     ? 'Your family can see your location' 
                     : 'Your location is hidden'),
                 value: _locationSharingEnabled,
-                onChanged: (value) {
+                onChanged: (value) async {
                   setDialogState(() => _locationSharingEnabled = value);
-                  setState(() {});
+                  if (mounted) setState(() {});
+                  // Persist it, otherwise the switch only moved on screen and
+                  // the tracker kept publishing regardless.
+                  await _applyLocationSharing(value);
                 },
                 activeColor: AppTheme.primaryColor,
               ),
@@ -2286,24 +2329,6 @@ class _SettingsContentState extends State<SettingsContent> {
     );
   }
 
-  void _showInfoDialog(String title, String content) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(title),
-        content: SingleChildScrollView(
-          child: Text(content),
-        ),
-        actions: [
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Close'),
-          ),
-        ],
-      ),
-    );
-  }
-
   void _showSignOutDialog() {
     showDialog(
       context: context,
@@ -2352,7 +2377,14 @@ class _SettingsContentState extends State<SettingsContent> {
             _buildSettingsTile(context, 'Notifications', Icons.notifications_outlined, _showNotificationsDialog, 
                 trailing: Switch(value: _notificationsEnabled, onChanged: (v) => setState(() => _notificationsEnabled = v), activeColor: AppTheme.primaryColor)),
             _buildSettingsTile(context, 'Location Sharing', Icons.location_on_outlined, _showLocationSharingDialog,
-                trailing: Switch(value: _locationSharingEnabled, onChanged: (v) => setState(() => _locationSharingEnabled = v), activeColor: AppTheme.primaryColor)),
+                trailing: Switch(
+                  value: _locationSharingEnabled,
+                  onChanged: (v) async {
+                    setState(() => _locationSharingEnabled = v);
+                    await _applyLocationSharing(v);
+                  },
+                  activeColor: AppTheme.primaryColor,
+                )),
           ]),
           const SizedBox(height: 16),
           _buildSettingsSection(context, 'Family', [

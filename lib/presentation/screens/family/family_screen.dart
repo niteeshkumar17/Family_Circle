@@ -1,11 +1,10 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import '../../../config/theme_config.dart';
 import '../../../services/family_service.dart';
 import '../../../services/location_service.dart';
-import '../../../services/background_service.dart';
 import '../history/member_history_screen.dart';
 import '../placeholder_screens.dart';
 
@@ -20,6 +19,7 @@ class RealFamilyScreen extends StatefulWidget {
 class _RealFamilyScreenState extends State<RealFamilyScreen> {
   final FamilyService _familyService = FamilyService();
   final LocationService _locationService = LocationService();
+  StreamSubscription<List<FamilyMemberData>>? _membersSubscription;
   List<FamilyMemberData> _members = [];
   bool _isLoading = true;
   String? _error;
@@ -33,55 +33,33 @@ class _RealFamilyScreenState extends State<RealFamilyScreen> {
 
   Future<void> _initialize() async {
     try {
+      // initialize() also points the background and foreground trackers at the
+      // active nest, so this screen no longer configures them itself.
       await _familyService.initialize();
-      
+
       if (!_familyService.hasFamily) {
-        // No family yet, show create/join dialog
         if (mounted) {
           _showNoFamilyDialog();
+          setState(() => _isLoading = false);
         }
-        setState(() => _isLoading = false);
         return;
       }
 
       _familyInfo = await _familyService.getCurrentFamilyInfo();
-      
-      // Initialize and start location tracking
-      final user = FirebaseAuth.instance.currentUser;
-      if (user != null && _familyService.currentFamilyId != null) {
-        await _locationService.initialize(
-          userId: user.uid,
-          familyId: _familyService.currentFamilyId!,
-        );
-        
-        // Also configure background service with IDs so it tracks in background
-        try {
-          await BackgroundLocationService().configureForUser(
-            userId: user.uid,
-            familyId: _familyService.currentFamilyId!,
-          );
-        } catch (e) {
-          debugPrint('Error configuring background service: $e');
-        }
-        
-        // Check permissions and start tracking
-        final hasPermission = await _locationService.checkPermissions();
-        if (hasPermission) {
-          await _locationService.startTracking();
-        }
+
+      if (await _locationService.checkPermissions()) {
+        await _locationService.startTracking();
       }
-      
-      // Listen to family members stream
-      _familyService.familyMembersStream.listen((members) {
-        if (mounted) {
-          setState(() {
-            _members = members;
-            _isLoading = false;
-          });
-        }
+
+      await _membersSubscription?.cancel();
+      _membersSubscription = _familyService.familyMembersStream.listen((members) {
+        if (!mounted) return;
+        setState(() {
+          _members = members;
+          _isLoading = false;
+        });
       });
 
-      // Also fetch initial data
       final members = await _familyService.getFamilyMembers();
       if (mounted) {
         setState(() {
@@ -97,6 +75,12 @@ class _RealFamilyScreenState extends State<RealFamilyScreen> {
         });
       }
     }
+  }
+
+  @override
+  void dispose() {
+    _membersSubscription?.cancel();
+    super.dispose();
   }
 
   void _showNoFamilyDialog() {
@@ -540,9 +524,12 @@ class _RealFamilyScreenState extends State<RealFamilyScreen> {
                 battery: member.battery,
                 lat: member.location?.latitude ?? 0,
                 lng: member.location?.longitude ?? 0,
-                speed: member.location?.speed ?? 0,
+                // MemberDetailScreen renders this as km/h, but LocationModel
+                // stores metres per second.
+                speed: member.speedKmh,
                 isMoving: member.isMoving,
                 phone: member.phone,
+                lastSeenText: member.lastSeenText,
               ),
             ),
           );

@@ -1,37 +1,42 @@
 import 'dart:async';
-import 'package:location/location.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:firebase_database/firebase_database.dart';
-import 'package:geocoding/geocoding.dart' hide Location;
+import 'package:geocoding/geocoding.dart';
 import 'package:battery_plus/battery_plus.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../data/models/location_model.dart';
 import '../data/models/geofence_model.dart';
 import 'dart:math' as math;
+import 'background_service.dart';
 import 'family_service.dart';
 
 /// Location Service
-/// 
-/// Handles foreground location tracking and geofence monitoring
+///
+/// Provides the foreground view of location: a position stream for the map,
+/// reads of other members' positions, and local geofence evaluation.
+///
+/// It deliberately does **not** write the current user's position to Realtime
+/// Database. [BackgroundLocationService] is the single writer for
+/// `locations/`, so the two never race each other with different payloads and
+/// intervals on the same key.
 class LocationService {
   static final LocationService _instance = LocationService._internal();
   factory LocationService() => _instance;
   LocationService._internal();
 
   final FirebaseDatabase _database = FirebaseDatabase.instance;
-  final Location _location = Location();
   final Battery _battery = Battery();
-  
-  StreamSubscription<LocationData>? _positionSubscription;
+
+  StreamSubscription<Position>? _positionSubscription;
   StreamSubscription<List<GeofenceModel>>? _geofenceSubscription;
-  final _locationController = StreamController<LocationModel>.broadcast();
-  
+  StreamController<LocationModel> _locationController =
+      StreamController<LocationModel>.broadcast();
+
   String? _userId;
   String? _familyId;
-  LocationData? _lastPosition;
+  Position? _lastPosition;
   List<GeofenceModel> _activeGeofences = [];
-  final Map<String, bool> _foregroundGeofenceStates = {};
   int _currentBattery = 100;
   bool _isCharging = false;
   String _networkStatus = 'unknown';
@@ -39,64 +44,61 @@ class LocationService {
   /// Stream of location updates
   Stream<LocationModel> get locationStream => _locationController.stream;
 
+  /// Geofence transitions detected locally, for in-app reactions. Push
+  /// notifications are sent by the `checkGeofences` Cloud Function so that a
+  /// backgrounded or closed app still alerts the family.
+  Stream<GeofenceEvent> get geofenceEvents => GeofenceService().eventStream;
+
+  String? get familyId => _familyId;
+
   /// Initialize the location service
   Future<void> initialize({
     required String userId,
     required String familyId,
   }) async {
+    final familyChanged = _familyId != familyId;
     _userId = userId;
     _familyId = familyId;
-    
-    _geofenceSubscription?.cancel();
-    _geofenceSubscription = FamilyService().getGeofencesStream(familyId).listen((geofences) {
-      setGeofences(geofences);
-    });
+
+    if (_locationController.isClosed) {
+      _locationController = StreamController<LocationModel>.broadcast();
+    }
+
+    if (familyChanged) {
+      // Geofences belong to a family, so carrying state across a nest switch
+      // would fire entry/exit events for places in the previous nest.
+      GeofenceService().resetStates();
+      _activeGeofences = [];
+    }
+
+    await _geofenceSubscription?.cancel();
+    _geofenceSubscription =
+        FamilyService().getGeofencesStream(familyId).listen(setGeofences);
   }
 
   /// Check and request location permissions
-  Future<bool> checkPermissions() async {
-    bool serviceEnabled = await _location.serviceEnabled();
-    if (!serviceEnabled) {
-      serviceEnabled = await _location.requestService();
-      if (!serviceEnabled) {
-        return false;
-      }
-    }
+  Future<bool> checkPermissions() => LocationPermissionHelper.requestPermissions();
 
-    PermissionStatus permission = await _location.hasPermission();
-    if (permission == PermissionStatus.denied) {
-      permission = await _location.requestPermission();
-      if (permission != PermissionStatus.granted) {
-        return false;
-      }
-    }
-
-    return true;
-  }
-
-  /// Start foreground location tracking
+  /// Start foreground location tracking.
+  ///
+  /// Feeds the map with a responsive local stream while the app is open.
   Future<void> startTracking() async {
     if (_userId == null || _familyId == null) {
       throw Exception('LocationService not initialized');
     }
 
-    try {
-      // Background mode is handled purely by flutter_background_service now.
-      // Do NOT call _location.enableBackgroundMode(enable: true) here, as it 
-      // creates a duplicate foreground service notification ("Location background service running").
-    } catch (e) {
-      // Handle gracefully
-    }
+    if (_positionSubscription != null) return;
 
-    // Configure location settings
-    await _location.changeSettings(
-      accuracy: LocationAccuracy.high,
-      distanceFilter: 10, // meters
-      interval: 5000,
+    _positionSubscription = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 10,
+      ),
+    ).listen(
+      _onPositionUpdate,
+      onError: (Object e) => debugPrint('LocationService stream error: $e'),
+      cancelOnError: false,
     );
-
-    // Start listening to position updates
-    _positionSubscription = _location.onLocationChanged.listen(_onPositionUpdate);
   }
 
   /// Stop location tracking
@@ -105,11 +107,19 @@ class LocationService {
     _positionSubscription = null;
   }
 
-  /// Force a manual location update (queries GPS and updates Firebase)
+  /// Force an immediate refresh.
+  ///
+  /// Delegates the Firebase write to the background service so there is still
+  /// exactly one writer, then refreshes the local stream for the UI.
   Future<void> updateCurrentLocation() async {
     if (_userId == null || _familyId == null) return;
+    BackgroundLocationService().forceUpdate();
     try {
-      final position = await _location.getLocation().timeout(const Duration(seconds: 7));
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+        ),
+      ).timeout(const Duration(seconds: 15));
       await _onPositionUpdate(position);
     } catch (e) {
       debugPrint('Error manually updating location: $e');
@@ -117,30 +127,18 @@ class LocationService {
   }
 
   /// Handle position updates
-  Future<void> _onPositionUpdate(LocationData position) async {
+  Future<void> _onPositionUpdate(Position position) async {
     _lastPosition = position;
 
-    // Save to SharedPreferences so the background isolate can read the last known position
-    // if the GPS blocks updates when stationary in the background.
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      if (position.latitude != null && position.longitude != null) {
-        await prefs.setDouble('bg_last_lat', position.latitude!);
-        await prefs.setDouble('bg_last_lng', position.longitude!);
-      }
-    } catch (_) {}
-
-    // Get battery info
     try {
       _currentBattery = await _battery.batteryLevel;
       final batteryState = await _battery.batteryState;
-      _isCharging = batteryState == BatteryState.charging || 
-                    batteryState == BatteryState.full;
+      _isCharging = batteryState == BatteryState.charging ||
+          batteryState == BatteryState.full;
     } catch (e) {
       // Keep previous values
     }
-    
-    // Get network status
+
     try {
       final connectivity = await Connectivity().checkConnectivity();
       if (connectivity.contains(ConnectivityResult.wifi)) {
@@ -154,30 +152,27 @@ class LocationService {
       _networkStatus = 'unknown';
     }
 
-    // Get address from coordinates
     String? address;
     try {
       final placemarks = await placemarkFromCoordinates(
-        position.latitude!,
-        position.longitude!,
+        position.latitude,
+        position.longitude,
       ).timeout(const Duration(seconds: 5));
       if (placemarks.isNotEmpty) {
-        final place = placemarks.first;
-        address = _formatAddress(place);
+        address = _formatAddress(placemarks.first);
       }
     } catch (e) {
       // Geocoding failed, continue without address
     }
 
-    // Create location model
     final location = LocationModel(
       userId: _userId!,
-      latitude: position.latitude!,
-      longitude: position.longitude!,
-      accuracy: position.accuracy ?? 0,
-      altitude: position.altitude ?? 0,
-      speed: position.speed ?? 0,
-      heading: position.heading ?? 0,
+      latitude: position.latitude,
+      longitude: position.longitude,
+      accuracy: position.accuracy,
+      altitude: position.altitude,
+      speed: position.speed,
+      heading: position.heading,
       address: address,
       batteryLevel: _currentBattery,
       isCharging: _isCharging,
@@ -186,27 +181,11 @@ class LocationService {
       isActive: true,
     );
 
-    // Emit to stream
-    _locationController.add(location);
-    
-    // Push to Firebase Realtime Database
-    await _pushLocationToFirebase(location);
-
-    // Check geofences
-    _checkGeofences(location);
-  }
-  
-  /// Push location data to Firebase Realtime Database
-  Future<void> _pushLocationToFirebase(LocationModel location) async {
-    if (_familyId == null || _userId == null) return;
-    
-    try {
-      await _database
-          .ref('locations/$_familyId/$_userId')
-          .set(location.toRealtimeDb());
-    } catch (e) {
-      // Failed to push, will retry on next update
+    if (!_locationController.isClosed) {
+      _locationController.add(location);
     }
+
+    _checkGeofences(location);
   }
 
   /// Format address from placemark
@@ -228,13 +207,17 @@ class LocationService {
 
   /// Get current location once
   Future<LocationModel> getCurrentLocation() async {
-    final position = await _location.getLocation();
+    final position = await Geolocator.getCurrentPosition(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+      ),
+    );
 
     String? address;
     try {
       final placemarks = await placemarkFromCoordinates(
-        position.latitude!,
-        position.longitude!,
+        position.latitude,
+        position.longitude,
       );
       if (placemarks.isNotEmpty) {
         address = _formatAddress(placemarks.first);
@@ -245,12 +228,12 @@ class LocationService {
 
     return LocationModel(
       userId: _userId ?? '',
-      latitude: position.latitude!,
-      longitude: position.longitude!,
-      accuracy: position.accuracy ?? 0,
-      altitude: position.altitude ?? 0,
-      speed: position.speed ?? 0,
-      heading: position.heading ?? 0,
+      latitude: position.latitude,
+      longitude: position.longitude,
+      accuracy: position.accuracy,
+      altitude: position.altitude,
+      speed: position.speed,
+      heading: position.heading,
       address: address,
       timestamp: DateTime.now(),
       isActive: true,
@@ -260,28 +243,12 @@ class LocationService {
   /// Set active geofences for monitoring
   void setGeofences(List<GeofenceModel> geofences) {
     _activeGeofences = geofences.where((g) => g.isActive).toList();
-
-    // Remove stale geofence states that are no longer active.
-    final activeIds = _activeGeofences.map((g) => g.id).toSet();
-    _foregroundGeofenceStates.removeWhere((geofenceId, _) => !activeIds.contains(geofenceId));
   }
 
-  /// Check if location triggers any geofences
+  /// Evaluate the new position against the family's geofences.
   void _checkGeofences(LocationModel location) {
-    for (final geofence in _activeGeofences) {
-      final isInside = geofence.containsLocation(location);
-      final wasInside = _foregroundGeofenceStates[geofence.id];
-
-      // Initialize without generating a false transition event.
-      if (wasInside == null) {
-        _foregroundGeofenceStates[geofence.id] = isInside;
-        continue;
-      }
-
-      if (wasInside != isInside) {
-        _foregroundGeofenceStates[geofence.id] = isInside;
-      }
-    }
+    if (_activeGeofences.isEmpty) return;
+    GeofenceService().checkGeofences(location, _activeGeofences, '');
   }
 
   /// Listen to a family member's location
@@ -329,7 +296,7 @@ class LocationService {
   }
 
   /// Get last known location from cache
-  LocationData? get lastKnownPosition => _lastPosition;
+  Position? get lastKnownPosition => _lastPosition;
 
   /// Calculate distance between two locations using Haversine formula
   double calculateDistance(
@@ -348,10 +315,28 @@ class LocationService {
 
   double _toRadians(double degrees) => degrees * math.pi / 180;
 
-  /// Dispose
-  void dispose() {
+  /// Tear down everything tied to the signed-in user.
+  ///
+  /// The broadcast controller is left open because this is a singleton that a
+  /// later session reuses; closing it here would make the next sign-in emit
+  /// onto a dead stream.
+  Future<void> reset() async {
     stopTracking();
-    _locationController.close();
+    await _geofenceSubscription?.cancel();
+    _geofenceSubscription = null;
+    GeofenceService().resetStates();
+    _activeGeofences = [];
+    _userId = null;
+    _familyId = null;
+    _lastPosition = null;
+  }
+
+  /// Dispose
+  Future<void> dispose() async {
+    await reset();
+    if (!_locationController.isClosed) {
+      await _locationController.close();
+    }
   }
 }
 

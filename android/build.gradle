@@ -13,6 +13,21 @@ subprojects {
     project.evaluationDependsOn(":app")
 }
 
+// Recent plugin releases (geolocator_android among them) read their SDK levels
+// from a `flutter` extension that the Flutter Gradle plugin only injects into
+// plugin projects from Flutter 3.27 onwards. This project builds with 3.24, so
+// the values are supplied here instead; remove once the SDK is upgraded.
+subprojects {
+    if (project.name != "app" && !project.hasProperty("flutter")) {
+        project.ext.flutter = [
+            compileSdkVersion: 36,
+            minSdkVersion    : 24,
+            targetSdkVersion : 34,
+            ndkVersion       : "26.1.10909125",
+        ]
+    }
+}
+
 tasks.register("clean", Delete) {
     delete rootProject.buildDir
 }

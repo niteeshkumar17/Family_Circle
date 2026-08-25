@@ -1,15 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:location/location.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:flutter/services.dart';
 import 'dart:math' as math;
-import '../../config/theme_config.dart';
 import '../../config/app_config.dart';
+import '../../config/theme_config.dart';
 import '../../data/models/geofence_model.dart';
+import '../../services/background_service.dart';
 import '../../services/family_service.dart';
 import 'history/member_history_screen.dart';
 
@@ -373,42 +374,28 @@ class _CreateGeofenceScreenState extends State<CreateGeofenceScreen> {
 
   Future<void> _getCurrentLocation() async {
     try {
-      final location = Location();
-      bool serviceEnabled;
-      PermissionStatus permissionGranted;
-
-      serviceEnabled = await location.serviceEnabled();
-      if (!serviceEnabled) {
-        serviceEnabled = await location.requestService();
-        if (!serviceEnabled) {
-          setState(() => _isLoading = false);
-          return;
-        }
+      if (!await LocationPermissionHelper.requestPermissions()) {
+        if (mounted) setState(() => _isLoading = false);
+        return;
       }
 
-      permissionGranted = await location.hasPermission();
-      if (permissionGranted == PermissionStatus.denied) {
-        permissionGranted = await location.requestPermission();
-        if (permissionGranted != PermissionStatus.granted) {
-          setState(() => _isLoading = false);
-          return;
-        }
-      }
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings:
+            const LocationSettings(accuracy: LocationAccuracy.high),
+      ).timeout(const Duration(seconds: 15));
 
-      final locationData = await location.getLocation();
-      if (locationData.latitude != null && locationData.longitude != null) {
-        setState(() {
-          _selectedPosition = LatLng(locationData.latitude!, locationData.longitude!);
-          _isLoading = false;
-          _updateCircle();
-        });
-        _mapController?.animateCamera(CameraUpdate.newLatLngZoom(_selectedPosition, 15));
-      } else {
-        setState(() => _isLoading = false);
-      }
+      if (!mounted) return;
+      setState(() {
+        _selectedPosition = LatLng(position.latitude, position.longitude);
+        _isLoading = false;
+        _updateCircle();
+      });
+      _mapController?.animateCamera(
+        CameraUpdate.newLatLngZoom(_selectedPosition, 15),
+      );
     } catch (e) {
       debugPrint('Error getting location: $e');
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -646,10 +633,19 @@ class _CreateGeofenceScreenState extends State<CreateGeofenceScreen> {
             child: const Text('Cancel'),
           ),
           TextButton(
-            onPressed: () {
-              FamilyService().deleteGeofence(geofence.familyId, geofence.id);
-              Navigator.pop(context); // Close dialog
-              Navigator.pop(context); // Go back to Places tab
+            onPressed: () async {
+              final navigator = Navigator.of(context);
+              final messenger = ScaffoldMessenger.of(context);
+              navigator.pop(); // Close dialog
+              try {
+                await FamilyService()
+                    .deleteGeofence(geofence.familyId, geofence.id);
+                navigator.pop(); // Go back to Places tab
+              } catch (e) {
+                messenger.showSnackBar(
+                  SnackBar(content: Text('Could not delete place: $e')),
+                );
+              }
             },
             child: const Text('Delete', style: TextStyle(color: Colors.red)),
           ),
@@ -673,9 +669,11 @@ class MemberDetailScreen extends StatefulWidget {
   final int battery;
   final double lat;
   final double lng;
+  /// Ground speed in km/h.
   final double speed;
   final bool isMoving;
   final String? phone;
+  final String? lastSeenText;
 
   const MemberDetailScreen({
     super.key,
@@ -688,6 +686,7 @@ class MemberDetailScreen extends StatefulWidget {
     this.speed = 0.0,
     this.isMoving = false,
     this.phone,
+    this.lastSeenText,
   });
 
   @override
@@ -745,26 +744,25 @@ class _MemberDetailScreenState extends State<MemberDetailScreen> {
 
   Future<void> _getCurrentLocation() async {
     try {
-      // 1. Try to get instant location from SharedPreferences (background service cache)
+      // Show something immediately using the tracker's last cached fix, then
+      // refine it with a real reading.
       final prefs = await SharedPreferences.getInstance();
-      final lat = prefs.getDouble('bg_last_lat');
-      final lng = prefs.getDouble('bg_last_lng');
-      
-      if (lat != null && lng != null) {
-        setState(() {
-          _currentLocation = LatLng(lat, lng);
-        });
-        return; // Return instantly!
+      final lat = prefs.getDouble(BgPrefsKeys.lastLat);
+      final lng = prefs.getDouble(BgPrefsKeys.lastLng);
+
+      if (lat != null && lng != null && mounted) {
+        setState(() => _currentLocation = LatLng(lat, lng));
       }
 
-      // 2. Fallback to hardware GPS (can be slow)
-      final location = Location();
-      final locationData = await location.getLocation();
-      if (locationData.latitude != null && locationData.longitude != null) {
-        setState(() {
-          _currentLocation = LatLng(locationData.latitude!, locationData.longitude!);
-        });
-      }
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings:
+            const LocationSettings(accuracy: LocationAccuracy.high),
+      ).timeout(const Duration(seconds: 15));
+
+      if (!mounted) return;
+      setState(() {
+        _currentLocation = LatLng(position.latitude, position.longitude);
+      });
     } catch (e) {
       debugPrint('Error getting location: $e');
     }
@@ -778,7 +776,13 @@ class _MemberDetailScreenState extends State<MemberDetailScreen> {
         const SnackBar(content: Text('Getting your location...')),
       );
       await _getCurrentLocation();
-      if (_currentLocation == null) return;
+      if (!mounted) return;
+      if (_currentLocation == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not determine your location')),
+        );
+        return;
+      }
     }
 
     setState(() => _isLoadingRoute = true);
@@ -789,7 +793,7 @@ class _MemberDetailScreenState extends State<MemberDetailScreen> {
       
       // NOTE: Using the API key from AndroidManifest.xml
       PolylineResult result = await polylinePoints.getRouteBetweenCoordinates(
-        googleApiKey: 'AIzaSyCJmFTrE-O6VZSkYthgej0uHr_Cg-jfYuE',
+        googleApiKey: AppConfig.googleMapsApiKey,
         request: PolylineRequest(
           origin: PointLatLng(_currentLocation!.latitude, _currentLocation!.longitude),
           destination: PointLatLng(widget.lat, widget.lng),
@@ -848,14 +852,12 @@ class _MemberDetailScreenState extends State<MemberDetailScreen> {
       }
     } catch (e) {
       debugPrint('Error fetching route: $e');
-      if (mounted) {
-        setState(() => _isLoadingRoute = false);
-      }
-      
+      if (!mounted) return;
+      setState(() => _isLoadingRoute = false);
+
       // Fallback only if API completely fails (e.g. no internet)
       _drawDirectLineFallback();
-      
-      if (!mounted) return;
+
       
       // Calculate distance for snackbar
       double distance = _calculateDistance(
@@ -922,6 +924,54 @@ class _MemberDetailScreenState extends State<MemberDetailScreen> {
 
   // Obsolete method removed: _createCurvedRoute
 
+  /// `launchUrl` reports "cannot launch" by returning false as often as it does
+  /// by throwing, so both outcomes have to surface the same message.
+  Future<void> _launchContactAction({
+    required String scheme,
+    required String failureMessage,
+  }) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final phone = widget.phone;
+
+    if (phone == null || phone.isEmpty) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Phone number not available')),
+      );
+      return;
+    }
+
+    var launched = false;
+    try {
+      launched = await launchUrl(Uri(scheme: scheme, path: phone));
+    } catch (e) {
+      debugPrint('Failed to launch $scheme: $e');
+    }
+
+    if (!launched) {
+      messenger.showSnackBar(SnackBar(content: Text(failureMessage)));
+    }
+  }
+
+  Future<void> _openExternalNavigation() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final mapsUri = Uri.parse(
+        'https://www.google.com/maps/dir/?api=1&destination=${widget.lat},${widget.lng}');
+
+    var launched = false;
+    try {
+      launched =
+          await launchUrl(mapsUri, mode: LaunchMode.externalApplication);
+    } catch (e) {
+      debugPrint('Failed to launch navigation: $e');
+    }
+
+    if (!launched) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Could not launch Google Maps')),
+      );
+    }
+  }
+
   void _clearRoute() {
     setState(() {
       _polylines = {};
@@ -981,15 +1031,21 @@ class _MemberDetailScreenState extends State<MemberDetailScreen> {
                     ),
                   ),
                   const Spacer(),
-                  if (_showingRoute)
-                    CircleAvatar(
-                      backgroundColor: Colors.white,
-                      child: IconButton(
-                        icon: const Icon(Icons.close, color: Colors.red),
-                        onPressed: _clearRoute,
-                        tooltip: 'Clear route',
-                      ),
-                    ),
+                  CircleAvatar(
+                    backgroundColor: Colors.white,
+                    child: _showingRoute
+                        ? IconButton(
+                            icon: const Icon(Icons.close, color: Colors.red),
+                            onPressed: _clearRoute,
+                            tooltip: 'Clear route',
+                          )
+                        : IconButton(
+                            icon: const Icon(Icons.route, color: Colors.black),
+                            onPressed:
+                                _isLoadingRoute ? null : _showRouteToMember,
+                            tooltip: 'Preview route',
+                          ),
+                  ),
                 ],
               ),
             ),
@@ -1028,7 +1084,9 @@ class _MemberDetailScreenState extends State<MemberDetailScreen> {
                         radius: 30,
                         backgroundColor: AppTheme.primaryColor.withOpacity(0.1),
                         child: Text(
-                          widget.memberName[0],
+                          widget.memberName.isEmpty
+                              ? '?'
+                              : widget.memberName[0].toUpperCase(),
                           style: const TextStyle(
                             fontSize: 24,
                             fontWeight: FontWeight.bold,
@@ -1118,18 +1176,38 @@ class _MemberDetailScreenState extends State<MemberDetailScreen> {
                               ),
                             ],
                           ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Updated 2 min ago',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.grey[500],
+                          if (widget.lastSeenText != null) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                              widget.lastSeenText!,
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey[500],
+                              ),
                             ),
-                          ),
+                          ],
                         ],
                       ),
                     ],
                   ),
+                  if (_showingRoute) ...[
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        const Icon(Icons.route,
+                            size: 16, color: AppTheme.primaryColor),
+                        const SizedBox(width: 6),
+                        Text(
+                          '${_formatDistance(_distanceKm)} away • $_estimatedTime',
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                            color: AppTheme.primaryColor,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                   const SizedBox(height: 20),
                   Row(
                     children: [
@@ -1139,27 +1217,10 @@ class _MemberDetailScreenState extends State<MemberDetailScreen> {
                         child: SizedBox(
                           height: 50,
                           child: OutlinedButton(
-                            onPressed: () async {
-                              if (widget.phone == null || widget.phone!.isEmpty) {
-                                if (context.mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(content: Text('Phone number not available')),
-                                  );
-                                }
-                                return;
-                              }
-                              
-                              try {
-                                final Uri phoneUri = Uri(scheme: 'tel', path: widget.phone);
-                                await launchUrl(phoneUri);
-                              } catch (e) {
-                                if (context.mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(content: Text('Could not make call')),
-                                  );
-                                }
-                              }
-                            },
+                            onPressed: () => _launchContactAction(
+                              scheme: 'tel',
+                              failureMessage: 'Could not make call',
+                            ),
                             style: OutlinedButton.styleFrom(
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(12),
@@ -1176,27 +1237,10 @@ class _MemberDetailScreenState extends State<MemberDetailScreen> {
                         child: SizedBox(
                           height: 50,
                           child: OutlinedButton(
-                            onPressed: () async {
-                              if (widget.phone == null || widget.phone!.isEmpty) {
-                                if (context.mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(content: Text('Phone number not available')),
-                                  );
-                                }
-                                return;
-                              }
-
-                              try {
-                                final Uri smsUri = Uri(scheme: 'sms', path: widget.phone);
-                                await launchUrl(smsUri);
-                              } catch (e) {
-                                if (context.mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(content: Text('Could not open messages')),
-                                  );
-                                }
-                              }
-                            },
+                            onPressed: () => _launchContactAction(
+                              scheme: 'sms',
+                              failureMessage: 'Could not open messages',
+                            ),
                             style: OutlinedButton.styleFrom(
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(12),
@@ -1213,19 +1257,7 @@ class _MemberDetailScreenState extends State<MemberDetailScreen> {
                         child: SizedBox(
                           height: 50,
                           child: ElevatedButton(
-                            onPressed: () async {
-                              final Uri mapsUri = Uri.parse(
-                                  'https://www.google.com/maps/dir/?api=1&destination=${widget.lat},${widget.lng}');
-                              try {
-                                await launchUrl(mapsUri, mode: LaunchMode.externalApplication);
-                              } catch (e) {
-                                if (context.mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(content: Text('Could not launch Google Maps')),
-                                  );
-                                }
-                              }
-                            },
+                            onPressed: _openExternalNavigation,
                             style: ElevatedButton.styleFrom(
                               backgroundColor: AppTheme.primaryColor,
                               padding: const EdgeInsets.symmetric(horizontal: 12),

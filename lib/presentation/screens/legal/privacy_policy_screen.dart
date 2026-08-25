@@ -58,9 +58,9 @@ class PrivacyPolicyScreen extends StatelessWidget {
                       color: Colors.white.withOpacity(0.2),
                       borderRadius: BorderRadius.circular(6),
                     ),
-                    child: Text(
+                    child: const Text(
                       'Effective: $_effectiveDate',
-                      style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500),
+                      style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500),
                     ),
                   ),
                   const SizedBox(height: 14),
@@ -364,7 +364,7 @@ class PrivacyPolicyScreen extends StatelessWidget {
               margin: const EdgeInsets.only(top: 7),
               width: 5,
               height: 5,
-              decoration: BoxDecoration(
+              decoration: const BoxDecoration(
                 color: AppTheme.primaryColor,
                 shape: BoxShape.circle,
               ),

@@ -96,6 +96,38 @@ class NotificationService {
     }
   }
 
+  /// Detach this device from the signing-out account.
+  ///
+  /// Must run while the user is still authenticated, otherwise the Firestore
+  /// write is rejected and the next owner of this device keeps receiving the
+  /// previous account's alerts.
+  Future<void> onSignOut() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user != null) {
+        await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+          'fcmToken': FieldValue.delete(),
+          'deviceInfo': FieldValue.delete(),
+        }, SetOptions(merge: true));
+      }
+    } catch (e) {
+      debugPrint('Error clearing FCM token: $e');
+    }
+
+    try {
+      await _fcm.deleteToken();
+    } catch (e) {
+      debugPrint('Error deleting FCM token: $e');
+    }
+
+    await _tokenRefreshSubscription?.cancel();
+    await _authStateSubscription?.cancel();
+    _tokenRefreshSubscription = null;
+    _authStateSubscription = null;
+    _fcmToken = null;
+    _isInitialized = false;
+  }
+
   /// Request notification permission
   Future<bool> _requestPermission() async {
     final settings = await _fcm.requestPermission(
@@ -448,18 +480,22 @@ class NotificationService {
   
   // --- FIRESTORE NOTIFICATION MANAGEMENT ---
 
+  /// Inbox for a user. Cloud Functions write to this exact path, so it must not
+  /// diverge from `saveInAppNotifications` in firebase/functions/index.js.
+  static CollectionReference<Map<String, dynamic>> _inboxRef(String userId) {
+    return FirebaseFirestore.instance
+        .collection('notifications')
+        .doc(userId)
+        .collection('items');
+  }
+
   /// Internal method to save a generated notification to Firestore
   Future<void> _saveNotificationToFirestore(NotificationModel notification) async {
     final userId = notification.userId;
     if (userId.isEmpty) return;
 
     try {
-      final docRef = FirebaseFirestore.instance
-          .collection('users')
-          .doc(userId)
-          .collection('notifications')
-          .doc();
-          
+      final docRef = _inboxRef(userId).doc();
       final newNotif = notification.copyWith(id: docRef.id);
       await docRef.set(newNotif.toJson());
     } catch (e) {
@@ -472,10 +508,7 @@ class NotificationService {
     final userId = FirebaseAuth.instance.currentUser?.uid;
     if (userId == null) return const Stream.empty();
 
-    return FirebaseFirestore.instance
-        .collection('users')
-        .doc(userId)
-        .collection('notifications')
+    return _inboxRef(userId)
         .orderBy('createdAt', descending: true)
         .limit(50)
         .snapshots()
@@ -490,12 +523,7 @@ class NotificationService {
     if (userId == null) return;
 
     try {
-      await FirebaseFirestore.instance
-          .collection('users')
-          .doc(userId)
-          .collection('notifications')
-          .doc(notificationId)
-          .update({'isRead': true});
+      await _inboxRef(userId).doc(notificationId).update({'isRead': true});
     } catch (e) {
       debugPrint('Error marking notification as read: $e');
     }
@@ -507,12 +535,8 @@ class NotificationService {
     if (userId == null) return;
 
     try {
-      final snapshot = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(userId)
-          .collection('notifications')
-          .where('isRead', isEqualTo: false)
-          .get();
+      final snapshot =
+          await _inboxRef(userId).where('isRead', isEqualTo: false).get();
 
       if (snapshot.docs.isEmpty) return;
 

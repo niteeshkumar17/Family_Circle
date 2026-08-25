@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
-import '../../../config/theme_config.dart';
 
 class HelpSupportScreen extends StatelessWidget {
   const HelpSupportScreen({super.key});
@@ -297,12 +296,12 @@ class HelpSupportScreen extends StatelessWidget {
                     width: double.infinity,
                     padding: const EdgeInsets.all(24),
                     decoration: BoxDecoration(
-                      gradient: LinearGradient(
+                      gradient: const LinearGradient(
                         begin: Alignment.topLeft,
                         end: Alignment.bottomRight,
                         colors: [
-                          const Color(0xFF1A1A2E),
-                          const Color(0xFF16213E),
+                          Color(0xFF1A1A2E),
+                          Color(0xFF16213E),
                         ],
                       ),
                       borderRadius: BorderRadius.circular(20),

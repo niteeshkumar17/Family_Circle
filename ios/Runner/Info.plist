@@ -56,9 +56,14 @@
 		<string>fetch</string>
 		<string>location</string>
 		<string>processing</string>
+		<string>remote-notification</string>
 	</array>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
+		<!-- Identifier registered by flutter_background_service_ios. Without it
+		     iOS refuses to schedule the refresh task and background tracking
+		     never resumes. -->
+		<string>dev.flutter.background.refresh</string>
 		<string>family.nest.location</string>
 	</array>
 </dict>

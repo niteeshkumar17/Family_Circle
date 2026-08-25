@@ -1,107 +1,236 @@
 const { onValueUpdated } = require('firebase-functions/v2/database');
-const { onDocumentCreated } = require('firebase-functions/v2/firestore');
+const {
+  onDocumentCreated,
+  onDocumentDeleted,
+} = require('firebase-functions/v2/firestore');
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const crypto = require('node:crypto');
 const { initializeApp } = require('firebase-admin/app');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
-const { getDatabase } = require('firebase-admin/database');
+const { getDatabaseWithUrl } = require('firebase-admin/database');
 const { getMessaging } = require('firebase-admin/messaging');
 
 initializeApp();
 
+// The CLI analyses this file with a FIREBASE_CONFIG that has no databaseURL, so
+// resolving the instance implicitly fails at deploy time. Name it explicitly.
+const DATABASE_URL = process.env.FIREBASE_DATABASE_URL ||
+  'https://familynest-ec590-default-rtdb.firebaseio.com';
+
 const db = getFirestore();
-const rtdb = getDatabase();
+const rtdb = getDatabaseWithUrl(DATABASE_URL);
 const messaging = getMessaging();
 
-// ============== GEOFENCE DETECTION ==============
+// Must match AppConfig in lib/config/app_config.dart.
+const GEOFENCE_HYSTERESIS_METERS = 20;
+const GEOFENCE_DEFAULT_DWELL_SECONDS = 180;
+const LOCATION_HISTORY_DAYS = 30;
+
+const LOW_BATTERY_THRESHOLD = 20;
+// Do not re-alert about the same phone more often than this.
+const LOW_BATTERY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+
+// ============== LOCATION TRIGGER ==============
 
 /**
- * Triggered when a user's location is updated in Realtime Database
- * Checks if the user has entered or exited any geofences
+ * Single entry point for everything that reacts to a location write.
+ *
+ * Geofence evaluation and the low-battery check used to be two separate
+ * triggers on the same path, which doubled the invocation cost of every
+ * location update.
  */
-exports.checkGeofences = onValueUpdated(
+exports.onLocationUpdated = onValueUpdated(
   '/locations/{familyId}/{userId}',
   async (event) => {
     const { familyId, userId } = event.params;
     const newLocation = event.data.after.val();
     const oldLocation = event.data.before.val();
 
-    // Skip if location hasn't changed significantly
-    if (oldLocation &&
-      Math.abs(newLocation.latitude - oldLocation.latitude) < 0.0001 &&
-      Math.abs(newLocation.longitude - oldLocation.longitude) < 0.0001) {
+    if (!newLocation || typeof newLocation !== 'object') {
       return null;
     }
 
-    // Get all active geofences for this family
-    const geofencesSnap = await db
-      .collection('families')
-      .doc(familyId)
-      .collection('geofences')
-      .where('isActive', '==', true)
-      .get();
+    const userName = await getDisplayName(userId);
 
-    if (geofencesSnap.empty) return null;
-
-    // Get user info
-    const userSnap = await db.collection('users').doc(userId).get();
-    const userName = userSnap.exists ? userSnap.data().displayName : 'A family member';
-
-    // Check each geofence
-    for (const geofenceDoc of geofencesSnap.docs) {
-      const geofence = geofenceDoc.data();
-
-      // Check if user is monitored by this geofence
-      if (geofence.monitoredMembers &&
-        geofence.monitoredMembers.length > 0 &&
-        !geofence.monitoredMembers.includes(userId)) {
-        continue;
-      }
-
-      const distance = calculateDistance(
-        newLocation.latitude, newLocation.longitude,
-        geofence.latitude, geofence.longitude
-      );
-
-      const isInside = distance <= geofence.radiusMeters;
-
-      // Get previous state
-      const stateRef = rtdb.ref(`geofence_states/${familyId}/${userId}/${geofenceDoc.id}`);
-      const stateSnap = await stateRef.get();
-      const wasInside = stateSnap.val() || false;
-
-      if (isInside !== wasInside) {
-        // State changed - create event
-        const eventType = isInside ? 'entry' : 'exit';
-
-        // Check quiet hours
-        if (!isInQuietHours(geofence.settings)) {
-          // Create geofence event
-          await db.collection('families').doc(familyId)
-            .collection('geofence_events').add({
-              geofenceId: geofenceDoc.id,
-              geofenceName: geofence.name,
-              userId: userId,
-              userName: userName,
-              eventType: eventType,
-              timestamp: FieldValue.serverTimestamp(),
-              latitude: newLocation.latitude,
-              longitude: newLocation.longitude,
-            });
-
-          // Send notifications to admins
-          await sendGeofenceNotification(familyId, userId, userName, geofence, eventType);
-        }
-
-        // Update state
-        await stateRef.set(isInside);
-      }
-    }
+    await Promise.all([
+      evaluateGeofences(familyId, userId, userName, newLocation, oldLocation),
+      checkLowBattery(familyId, userId, userName, newLocation),
+    ]);
 
     return null;
   }
 );
+
+async function evaluateGeofences(familyId, userId, userName, newLocation, oldLocation) {
+  const latitude = toFiniteNumber(newLocation.latitude);
+  const longitude = toFiniteNumber(newLocation.longitude);
+
+  if (latitude === null || longitude === null) {
+    return;
+  }
+
+  // Skip jitter: roughly 11 m at the equator.
+  if (oldLocation &&
+    Math.abs(latitude - toFiniteNumber(oldLocation.latitude)) < 0.0001 &&
+    Math.abs(longitude - toFiniteNumber(oldLocation.longitude)) < 0.0001) {
+    return;
+  }
+
+  const geofencesSnap = await db
+    .collection('families')
+    .doc(familyId)
+    .collection('geofences')
+    .where('isActive', '==', true)
+    .get();
+
+  if (geofencesSnap.empty) return;
+
+  for (const geofenceDoc of geofencesSnap.docs) {
+    const geofence = geofenceDoc.data() || {};
+    const settings = geofence.settings || {};
+
+    if (Array.isArray(geofence.monitoredMembers) &&
+      geofence.monitoredMembers.length > 0 &&
+      !geofence.monitoredMembers.includes(userId)) {
+      continue;
+    }
+
+    const centerLat = toFiniteNumber(geofence.latitude);
+    const centerLng = toFiniteNumber(geofence.longitude);
+    const radius = toFiniteNumber(geofence.radiusMeters);
+
+    if (centerLat === null || centerLng === null || radius === null) {
+      console.warn('Skipping malformed geofence', {
+        familyId,
+        geofenceId: geofenceDoc.id,
+      });
+      continue;
+    }
+
+    const distance = calculateDistance(latitude, longitude, centerLat, centerLng);
+
+    const stateRef = rtdb.ref(`geofence_states/${familyId}/${userId}/${geofenceDoc.id}`);
+    const state = normalizeGeofenceState((await stateRef.get()).val());
+
+    // A cushion around the boundary keeps a member who is parked on the edge
+    // from generating an endless stream of entry/exit alerts.
+    const isInside = state.inside
+      ? distance <= radius + GEOFENCE_HYSTERESIS_METERS
+      : distance <= radius - GEOFENCE_HYSTERESIS_METERS;
+
+    const now = Date.now();
+
+    if (isInside !== state.inside) {
+      const eventType = isInside ? 'entry' : 'exit';
+      const wantsNotification = isInside
+        ? settings.notifyOnEntry !== false
+        : settings.notifyOnExit !== false;
+      const notify = wantsNotification && !isInQuietHours(settings);
+
+      await recordGeofenceEvent({
+        familyId,
+        geofenceId: geofenceDoc.id,
+        geofence,
+        userId,
+        userName,
+        eventType,
+        latitude,
+        longitude,
+        notificationSent: notify,
+      });
+
+      if (notify) {
+        await sendGeofenceNotification(familyId, userId, userName, geofence, eventType);
+      }
+
+      await stateRef.set({
+        inside: isInside,
+        since: now,
+        dwellNotified: false,
+      });
+      continue;
+    }
+
+    // Still inside: fire the dwell alert once the member has stayed long enough.
+    const dwellSeconds = toFiniteNumber(settings.dwellTimeSeconds) > 0
+      ? settings.dwellTimeSeconds
+      : GEOFENCE_DEFAULT_DWELL_SECONDS;
+
+    if (isInside &&
+      settings.notifyOnDwell !== false &&
+      !state.dwellNotified &&
+      state.since > 0 &&
+      now - state.since >= dwellSeconds * 1000) {
+      const notify = !isInQuietHours(settings);
+
+      await recordGeofenceEvent({
+        familyId,
+        geofenceId: geofenceDoc.id,
+        geofence,
+        userId,
+        userName,
+        eventType: 'dwell',
+        latitude,
+        longitude,
+        notificationSent: notify,
+      });
+
+      if (notify) {
+        await sendGeofenceNotification(familyId, userId, userName, geofence, 'dwell');
+      }
+
+      await stateRef.update({ dwellNotified: true });
+    }
+  }
+}
+
+async function checkLowBattery(familyId, userId, userName, newData) {
+  const battery = toFiniteNumber(newData.battery);
+  if (battery === null || battery > LOW_BATTERY_THRESHOLD) {
+    return;
+  }
+
+  const alertRef = rtdb.ref(`low_battery_alerts/${familyId}/${userId}`);
+  const lastAlertAt = toFiniteNumber((await alertRef.get()).val()) || 0;
+  const now = Date.now();
+
+  // Charging cycles push the battery back and forth across the threshold, so a
+  // cooldown rather than a simple edge check is what keeps this from spamming.
+  if (now - lastAlertAt < LOW_BATTERY_COOLDOWN_MS) {
+    return;
+  }
+
+  const recipientIds = await getNotifiableAdminIds(familyId, userId);
+  if (recipientIds.length === 0) return;
+
+  const title = '🔋 Low Battery Alert';
+  const body = `${userName}'s phone is at ${battery}%`;
+
+  await Promise.all([
+    alertRef.set(now),
+    saveInAppNotifications(recipientIds, {
+      type: 'lowBattery',
+      title,
+      body,
+      data: {
+        userId: userId,
+        familyId: familyId,
+        batteryLevel: String(battery),
+      },
+    }),
+    pushToUsers(recipientIds, {
+      notification: { title, body },
+      data: {
+        type: 'lowBattery',
+        userId: userId,
+        familyId: familyId,
+        batteryLevel: String(battery),
+      },
+      android: { notification: { channelId: 'system_alerts' } },
+    }),
+  ]);
+}
 
 // ============== SOS BROADCAST ==============
 
@@ -122,7 +251,6 @@ exports.broadcastSOS = onDocumentCreated('sos_events/{eventId}', async (event) =
     return null;
   }
 
-  // Get all family members except the SOS sender
   const membersSnap = await db
     .collection('families')
     .doc(sosEvent.familyId)
@@ -133,56 +261,38 @@ exports.broadcastSOS = onDocumentCreated('sos_events/{eventId}', async (event) =
     .map((memberDoc) => memberDoc.id)
     .filter((memberId) => memberId !== sosEvent.userId);
 
-  const recipientUserSnaps = await Promise.all(
-    recipientIds.map((memberId) => db.collection('users').doc(memberId).get())
-  );
+  if (recipientIds.length === 0) {
+    return null;
+  }
 
-  const recipientTokenEntries = recipientUserSnaps
-    .map((userSnap, index) => {
-      const token = userSnap.data()?.deviceInfo?.fcmToken;
-      if (!token) {
-        return null;
-      }
+  const title = '🚨 SOS EMERGENCY';
+  const body = `${sosEvent.userName || 'A family member'} needs help!`;
+  const latitude = sosEvent.triggerLocation?.latitude?.toString() || '';
+  const longitude = sosEvent.triggerLocation?.longitude?.toString() || '';
 
-      return {
-        userId: recipientIds[index],
-        token,
-      };
-    })
-    .filter(Boolean);
-
-  const tokens = recipientTokenEntries.map((entry) => entry.token);
-
-  const notificationPromises = recipientIds.map((memberId) => {
-    return db.collection('notifications').doc(memberId)
-        .collection('items').add({
-          type: 'sos',
-          title: '🚨 SOS EMERGENCY',
-          body: `${sosEvent.userName} needs help!`,
-          data: {
-            eventId: eventId,
-            userId: sosEvent.userId,
-            latitude: sosEvent.triggerLocation?.latitude?.toString() || '',
-            longitude: sosEvent.triggerLocation?.longitude?.toString() || '',
-          },
-          createdAt: FieldValue.serverTimestamp(),
-          isRead: false,
-          priority: 'urgent',
-        });
-  });
-
-  // Send FCM notifications
-  if (tokens.length > 0) {
-    const batchResponse = await messaging.sendEachForMulticast({
-      tokens: tokens,
-      notification: {
-        title: '🚨 SOS EMERGENCY',
-        body: `${sosEvent.userName} needs help!`,
+  await Promise.all([
+    saveInAppNotifications(recipientIds, {
+      type: 'sos',
+      title,
+      body,
+      priority: 'urgent',
+      data: {
+        eventId: eventId,
+        userId: sosEvent.userId,
+        familyId: sosEvent.familyId,
+        latitude,
+        longitude,
       },
+    }),
+    pushToUsers(recipientIds, {
+      notification: { title, body },
       data: {
         type: 'sos',
         eventId: eventId,
         userId: sosEvent.userId,
+        familyId: sosEvent.familyId,
+        latitude,
+        longitude,
         click_action: 'FLUTTER_NOTIFICATION_CLICK',
       },
       android: {
@@ -196,6 +306,7 @@ exports.broadcastSOS = onDocumentCreated('sos_events/{eventId}', async (event) =
         },
       },
       apns: {
+        headers: { 'apns-priority': '10' },
         payload: {
           aps: {
             sound: 'sos_alarm.wav',
@@ -204,93 +315,11 @@ exports.broadcastSOS = onDocumentCreated('sos_events/{eventId}', async (event) =
           },
         },
       },
-    });
-
-    await cleanupInvalidFcmTokens(recipientTokenEntries, batchResponse);
-  }
-
-  await Promise.all(notificationPromises);
+    }),
+  ]);
 
   return null;
 });
-
-// ============== LOW BATTERY ALERT ==============
-
-/**
- * Triggered when a user's location is updated
- * Checks if battery is low and sends alert
- */
-exports.checkLowBattery = onValueUpdated(
-  '/locations/{familyId}/{userId}',
-  async (event) => {
-    const { familyId, userId } = event.params;
-    const newData = event.data.after.val();
-    const oldData = event.data.before.val();
-
-    // Check if battery just dropped below threshold
-    const threshold = 20;
-    if (newData.battery <= threshold && (!oldData || oldData.battery > threshold)) {
-      const userSnap = await db.collection('users').doc(userId).get();
-      const userName = userSnap.exists ? userSnap.data().displayName : 'A family member';
-
-      // Get admin members
-      const adminsSnap = await db
-        .collection('families')
-        .doc(familyId)
-        .collection('members')
-        .where('role', '==', 'admin')
-        .get();
-
-      const adminIds = adminsSnap.docs
-        .map((adminDoc) => adminDoc.id)
-        .filter((adminId) => adminId !== userId);
-
-      const adminUserSnaps = await Promise.all(
-        adminIds.map((adminId) => db.collection('users').doc(adminId).get())
-      );
-
-      const adminTokenEntries = adminUserSnaps
-        .map((adminUserSnap, index) => {
-          const token = adminUserSnap.data()?.deviceInfo?.fcmToken;
-          if (!token) {
-            return null;
-          }
-
-          return {
-            userId: adminIds[index],
-            token,
-          };
-        })
-        .filter(Boolean);
-
-      const tokens = adminTokenEntries.map((entry) => entry.token);
-
-      if (tokens.length > 0) {
-        const batchResponse = await messaging.sendEachForMulticast({
-          tokens: tokens,
-          notification: {
-            title: '🔋 Low Battery Alert',
-            body: `${userName}'s phone is at ${newData.battery}%`,
-          },
-          data: {
-            type: 'lowBattery',
-            userId: userId,
-            batteryLevel: newData.battery.toString(),
-          },
-          android: {
-            notification: {
-              channelId: 'system_alerts',
-            },
-          },
-        });
-
-        await cleanupInvalidFcmTokens(adminTokenEntries, batchResponse);
-      }
-    }
-
-    return null;
-  }
-);
 
 // ============== FAMILY INVITE ==============
 
@@ -302,7 +331,11 @@ exports.generateInviteCode = onCall(async (request) => {
     throw new HttpsError('unauthenticated', 'Must be logged in');
   }
 
-  const { familyId } = request.data;
+  const { familyId } = request.data || {};
+
+  if (!familyId) {
+    throw new HttpsError('invalid-argument', 'familyId is required');
+  }
 
   // Check if user is admin
   const memberSnap = await db
@@ -334,13 +367,79 @@ exports.generateInviteCode = onCall(async (request) => {
   };
 });
 
+// ============== MEMBERSHIP MIRRORING & CLEANUP ==============
+
+/**
+ * Mirrors membership into Realtime Database so that the database rules can
+ * scope reads to a member's own families without a Firestore lookup.
+ */
+exports.onMemberAdded = onDocumentCreated(
+  'families/{familyId}/members/{userId}',
+  async (event) => {
+    const { familyId, userId } = event.params;
+    await rtdb.ref(`family_members/${familyId}/${userId}`).set(true);
+    return null;
+  }
+);
+
+/**
+ * A member cannot clean up another member's data from the client: the security
+ * rules only let a user write their own location. Removal is therefore
+ * finished here with admin privileges.
+ */
+exports.onMemberRemoved = onDocumentDeleted(
+  'families/{familyId}/members/{userId}',
+  async (event) => {
+    const { familyId, userId } = event.params;
+
+    await Promise.all([
+      rtdb.ref(`family_members/${familyId}/${userId}`).remove(),
+      rtdb.ref(`locations/${familyId}/${userId}`).remove(),
+      rtdb.ref(`locationHistory/${familyId}/${userId}`).remove(),
+      rtdb.ref(`geofence_states/${familyId}/${userId}`).remove(),
+      rtdb.ref(`low_battery_alerts/${familyId}/${userId}`).remove(),
+      detachUserFromFamily(userId, familyId),
+    ]);
+
+    return null;
+  }
+);
+
+/**
+ * Deletes the data that a client cannot reach once the family document is gone.
+ */
+exports.onFamilyDeleted = onDocumentDeleted('families/{familyId}', async (event) => {
+  const { familyId } = event.params;
+
+  const memberIds = Object.keys(
+    (await rtdb.ref(`family_members/${familyId}`).get()).val() || {}
+  );
+
+  await Promise.all([
+    rtdb.ref(`family_members/${familyId}`).remove(),
+    rtdb.ref(`locations/${familyId}`).remove(),
+    rtdb.ref(`locationHistory/${familyId}`).remove(),
+    rtdb.ref(`geofence_states/${familyId}`).remove(),
+    rtdb.ref(`low_battery_alerts/${familyId}`).remove(),
+    rtdb.ref(`sos_active/${familyId}`).remove(),
+    ...memberIds.map((userId) => detachUserFromFamily(userId, familyId)),
+  ]);
+
+  await Promise.all([
+    deleteSubcollection(db.collection('families').doc(familyId).collection('geofences')),
+    deleteSubcollection(db.collection('families').doc(familyId).collection('geofence_events')),
+  ]);
+
+  return null;
+});
+
 // ============== CLEANUP FUNCTIONS ==============
 
 /**
  * Cleanup expired invites
  * Runs daily at 4 AM UTC
  */
-exports.cleanupExpiredInvites = onSchedule('0 4 * * *', async (event) => {
+exports.cleanupExpiredInvites = onSchedule('0 4 * * *', async () => {
   const now = new Date();
   const pageSize = 400;
   let totalCleared = 0;
@@ -376,7 +475,82 @@ exports.cleanupExpiredInvites = onSchedule('0 4 * * *', async (event) => {
   return null;
 });
 
+/**
+ * Drops location breadcrumbs older than the advertised retention window.
+ * History is bucketed per day (locationHistory/{familyId}/{userId}/{yyyy-MM-dd}),
+ * so pruning is a matter of removing the stale day buckets.
+ *
+ * Runs daily at 3:30 AM UTC.
+ */
+exports.pruneLocationHistory = onSchedule('30 3 * * *', async () => {
+  const cutoff = new Date(Date.now() - LOCATION_HISTORY_DAYS * 24 * 60 * 60 * 1000);
+  const cutoffKey = cutoff.toISOString().slice(0, 10); // yyyy-MM-dd sorts lexically
+  const families = (await rtdb.ref('locationHistory').get()).val() || {};
+
+  let removed = 0;
+
+  for (const [familyId, members] of Object.entries(families)) {
+    for (const [userId, days] of Object.entries(members || {})) {
+      const staleDays = Object.keys(days || {}).filter((dayKey) => dayKey < cutoffKey);
+      if (staleDays.length === 0) continue;
+
+      const updates = {};
+      staleDays.forEach((dayKey) => {
+        updates[dayKey] = null;
+      });
+
+      await rtdb.ref(`locationHistory/${familyId}/${userId}`).update(updates);
+      removed += staleDays.length;
+    }
+  }
+
+  console.log(`Pruned ${removed} stale location history buckets`);
+  return null;
+});
+
+/**
+ * Removes read in-app notifications older than 30 days.
+ * Runs daily at 3 AM UTC.
+ */
+exports.cleanupOldNotifications = onSchedule('0 3 * * *', async () => {
+  const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const stale = await db
+    .collectionGroup('items')
+    .where('createdAt', '<', cutoff)
+    .limit(500)
+    .get();
+
+  if (stale.empty) return null;
+
+  const batch = db.batch();
+  stale.docs.forEach((doc) => batch.delete(doc.ref));
+  await batch.commit();
+
+  console.log(`Deleted ${stale.size} stale notifications`);
+  return null;
+});
+
 // ============== HELPER FUNCTIONS ==============
+
+function toFiniteNumber(value) {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeGeofenceState(raw) {
+  // Older builds stored a plain boolean at this path.
+  if (typeof raw === 'boolean') {
+    return { inside: raw, since: 0, dwellNotified: false };
+  }
+  if (!raw || typeof raw !== 'object') {
+    return { inside: false, since: 0, dwellNotified: false };
+  }
+  return {
+    inside: raw.inside === true,
+    since: toFiniteNumber(raw.since) || 0,
+    dwellNotified: raw.dwellNotified === true,
+  };
+}
 
 function calculateDistance(lat1, lon1, lat2, lon2) {
   const R = 6371000; // Earth's radius in meters
@@ -438,6 +612,147 @@ async function generateUniqueFamilyInviteCode(length) {
   throw new HttpsError('internal', 'Failed to generate a unique invite code');
 }
 
+async function getDisplayName(userId) {
+  const userSnap = await db.collection('users').doc(userId).get();
+  if (!userSnap.exists) return 'A family member';
+  const data = userSnap.data() || {};
+  return data.displayName || data.name || 'A family member';
+}
+
+async function detachUserFromFamily(userId, familyId) {
+  const userRef = db.collection('users').doc(userId);
+
+  try {
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(userRef);
+      if (!snap.exists) return;
+
+      const updates = {
+        familyIds: FieldValue.arrayRemove(familyId),
+      };
+      if (snap.data()?.currentFamilyId === familyId) {
+        const remaining = (snap.data()?.familyIds || [])
+          .filter((id) => id !== familyId);
+        updates.currentFamilyId = remaining[0] || null;
+      }
+
+      tx.update(userRef, updates);
+    });
+  } catch (error) {
+    console.error('Failed to detach user from family', { userId, familyId, error });
+  }
+}
+
+async function deleteSubcollection(collectionRef) {
+  const pageSize = 400;
+
+  while (true) {
+    const snap = await collectionRef.limit(pageSize).get();
+    if (snap.empty) return;
+
+    const batch = db.batch();
+    snap.docs.forEach((doc) => batch.delete(doc.ref));
+    await batch.commit();
+
+    if (snap.size < pageSize) return;
+  }
+}
+
+async function recordGeofenceEvent({
+  familyId,
+  geofenceId,
+  geofence,
+  userId,
+  userName,
+  eventType,
+  latitude,
+  longitude,
+  notificationSent,
+}) {
+  await db.collection('families').doc(familyId)
+    .collection('geofence_events').add({
+      geofenceId,
+      geofenceName: geofence.name || 'a place',
+      userId,
+      userName,
+      eventType,
+      timestamp: FieldValue.serverTimestamp(),
+      latitude,
+      longitude,
+      notificationSent,
+    });
+}
+
+/**
+ * Admins that should hear about a family event, honouring the per-geofence
+ * `notifyMembers` allow-list when one is configured.
+ */
+async function getNotifiableAdminIds(familyId, excludeUserId, notifyMembers) {
+  const adminsSnap = await db
+    .collection('families')
+    .doc(familyId)
+    .collection('members')
+    .where('role', '==', 'admin')
+    .get();
+
+  return adminsSnap.docs
+    .map((adminDoc) => adminDoc.id)
+    .filter((adminId) => adminId !== excludeUserId)
+    .filter((adminId) => !Array.isArray(notifyMembers) ||
+      notifyMembers.length === 0 ||
+      notifyMembers.includes(adminId));
+}
+
+/**
+ * Writes the in-app notification list entries. The path must stay in sync with
+ * NotificationService in the Flutter app.
+ */
+async function saveInAppNotifications(userIds, { type, title, body, data, priority }) {
+  if (userIds.length === 0) return;
+
+  const batch = db.batch();
+
+  userIds.forEach((userId) => {
+    const ref = db.collection('notifications').doc(userId).collection('items').doc();
+    batch.set(ref, {
+      type,
+      title,
+      body,
+      data: data || {},
+      createdAt: FieldValue.serverTimestamp(),
+      isRead: false,
+      priority: priority || 'normal',
+    });
+  });
+
+  await batch.commit();
+}
+
+async function pushToUsers(userIds, message) {
+  if (userIds.length === 0) return;
+
+  const userSnaps = await Promise.all(
+    userIds.map((userId) => db.collection('users').doc(userId).get())
+  );
+
+  const tokenEntries = userSnaps
+    .map((userSnap, index) => {
+      const data = userSnap.data() || {};
+      const token = data.deviceInfo?.fcmToken || data.fcmToken;
+      return token ? { userId: userIds[index], token } : null;
+    })
+    .filter(Boolean);
+
+  if (tokenEntries.length === 0) return;
+
+  const batchResponse = await messaging.sendEachForMulticast({
+    ...message,
+    tokens: tokenEntries.map((entry) => entry.token),
+  });
+
+  await cleanupInvalidFcmTokens(tokenEntries, batchResponse);
+}
+
 function isStaleFcmError(error) {
   const code = error?.code;
   return code === 'messaging/registration-token-not-registered' ||
@@ -478,7 +793,8 @@ async function cleanupInvalidFcmTokens(tokenEntries, batchResponse) {
 
     const userId = staleUserIds[index];
     const staleToken = staleTokenByUser.get(userId);
-    const currentToken = userSnap.data()?.deviceInfo?.fcmToken;
+    const data = userSnap.data() || {};
+    const currentToken = data.deviceInfo?.fcmToken || data.fcmToken;
 
     // Avoid deleting if the token changed after this send operation started.
     if (!currentToken || currentToken !== staleToken) {
@@ -500,59 +816,56 @@ async function cleanupInvalidFcmTokens(tokenEntries, batchResponse) {
 }
 
 async function sendGeofenceNotification(familyId, userId, userName, geofence, eventType) {
-  const action = eventType === 'entry' ? 'arrived at' : 'left';
+  const settings = geofence.settings || {};
+  const geofenceName = geofence.name || 'a place';
 
-  // Get admin tokens
-  const adminsSnap = await db
-    .collection('families')
-    .doc(familyId)
-    .collection('members')
-    .where('role', '==', 'admin')
-    .get();
-
-  const adminIds = adminsSnap.docs
-    .map((adminDoc) => adminDoc.id)
-    .filter((adminId) => adminId !== userId);
-
-  const adminUserSnaps = await Promise.all(
-    adminIds.map((adminId) => db.collection('users').doc(adminId).get())
+  const recipientIds = await getNotifiableAdminIds(
+    familyId,
+    userId,
+    settings.notifyMembers
   );
 
-  const adminTokenEntries = adminUserSnaps
-    .map((userSnap, index) => {
-      const token = userSnap.data()?.deviceInfo?.fcmToken;
-      if (!token) {
-        return null;
-      }
+  if (recipientIds.length === 0) return;
 
-      return {
-        userId: adminIds[index],
-        token,
-      };
-    })
-    .filter(Boolean);
+  const titles = {
+    entry: '📍 Arrival',
+    exit: '🚶 Departure',
+    dwell: '⏱️ Still there',
+  };
+  const actions = {
+    entry: 'arrived at',
+    exit: 'left',
+    dwell: 'has been at',
+  };
+  const types = {
+    entry: 'geofenceEntry',
+    exit: 'geofenceExit',
+    dwell: 'geofenceDwell',
+  };
 
-  const tokens = adminTokenEntries.map((entry) => entry.token);
+  const title = titles[eventType];
+  const body = `${userName} ${actions[eventType]} ${geofenceName}`;
 
-  if (tokens.length > 0) {
-    const batchResponse = await messaging.sendEachForMulticast({
-      tokens: tokens,
-      notification: {
-        title: eventType === 'entry' ? '📍 Arrival' : '🚶 Departure',
-        body: `${userName} ${action} ${geofence.name}`,
-      },
+  await Promise.all([
+    saveInAppNotifications(recipientIds, {
+      type: types[eventType],
+      title,
+      body,
       data: {
-        type: eventType === 'entry' ? 'geofenceEntry' : 'geofenceExit',
-        userId: userId,
-        geofenceName: geofence.name,
+        userId,
+        familyId,
+        geofenceName,
       },
-      android: {
-        notification: {
-          channelId: 'geofence_alerts',
-        },
+    }),
+    pushToUsers(recipientIds, {
+      notification: { title, body },
+      data: {
+        type: types[eventType],
+        userId,
+        familyId,
+        geofenceName,
       },
-    });
-
-    await cleanupInvalidFcmTokens(adminTokenEntries, batchResponse);
-  }
+      android: { notification: { channelId: 'geofence_alerts' } },
+    }),
+  ]);
 }

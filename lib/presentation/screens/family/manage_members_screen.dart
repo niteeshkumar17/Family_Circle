@@ -33,27 +33,24 @@ class _ManageMembersScreenState extends State<ManageMembersScreen> {
           ),
           ElevatedButton(
             onPressed: () async {
+              final messenger = ScaffoldMessenger.of(this.context);
               Navigator.pop(context);
               setState(() => _isLoading = true);
               try {
                 await _familyService.removeMemberFromFamily(widget.familyId, memberId);
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text('$memberName removed successfully.'),
-                      backgroundColor: AppTheme.successColor,
-                    ),
-                  );
-                }
+                messenger.showSnackBar(
+                  SnackBar(
+                    content: Text('$memberName removed successfully.'),
+                    backgroundColor: AppTheme.successColor,
+                  ),
+                );
               } catch (e) {
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text('Error: $e'),
-                      backgroundColor: AppTheme.errorColor,
-                    ),
-                  );
-                }
+                messenger.showSnackBar(
+                  SnackBar(
+                    content: Text('Error: $e'),
+                    backgroundColor: AppTheme.errorColor,
+                  ),
+                );
               } finally {
                 if (mounted) {
                   setState(() => _isLoading = false);

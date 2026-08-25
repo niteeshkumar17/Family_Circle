@@ -38,8 +38,22 @@ class NotificationModel {
   Map<String, dynamic> toJson() => _$NotificationModelToJson(this);
 
   factory NotificationModel.fromFirestore(DocumentSnapshot doc) {
-    final data = doc.data() as Map<String, dynamic>;
-    return NotificationModel.fromJson({...data, 'id': doc.id});
+    final data = (doc.data() as Map<String, dynamic>?) ?? const {};
+    // Server-written notifications live at notifications/{userId}/items/{id}
+    // and omit the redundant userId field, so recover it from the path.
+    final ownerId = data['userId'] as String? ??
+        doc.reference.parent.parent?.id ??
+        '';
+    return NotificationModel.fromJson({
+      ...data,
+      'id': doc.id,
+      'userId': ownerId,
+      'type': data['type'] as String? ?? NotificationType.general.name,
+      'title': data['title'] as String? ?? '',
+      'body': data['body'] as String? ?? '',
+      'priority': data['priority'] as String? ?? NotificationPriority.normal.name,
+      'isRead': data['isRead'] as bool? ?? false,
+    });
   }
 
   NotificationModel copyWith({
@@ -75,6 +89,7 @@ class NotificationModel {
         return 'sos_alerts';
       case NotificationType.geofenceEntry:
       case NotificationType.geofenceExit:
+      case NotificationType.geofenceDwell:
         return 'geofence_alerts';
       case NotificationType.lowBattery:
       case NotificationType.phoneOff:
@@ -137,6 +152,7 @@ enum NotificationType {
   sos,             // Emergency SOS alert
   geofenceEntry,   // Member entered a geofence
   geofenceExit,    // Member exited a geofence
+  geofenceDwell,   // Member stayed inside a geofence past the dwell time
   lowBattery,      // Member's battery is low
   phoneOff,        // Member's phone went offline
   familyJoin,      // New member joined family
