@@ -80,6 +80,7 @@ dependencies:
   flutter_tts: ^4.2.5
   google_generative_ai: ^0.4.7
   geolocator: 13.0.4
+  workmanager: ^0.7.0
 
 dev_dependencies:
   flutter_test:

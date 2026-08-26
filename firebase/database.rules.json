@@ -65,6 +65,11 @@
     "low_battery_alerts": {
       ".read": false,
       ".write": false
+    },
+
+    "wakeAttempts": {
+      ".read": false,
+      ".write": false
     }
   }
 }

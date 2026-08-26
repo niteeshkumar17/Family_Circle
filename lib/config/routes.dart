@@ -16,6 +16,7 @@ import '../presentation/screens/family/manage_members_screen.dart';
 import '../presentation/screens/legal/privacy_policy_screen.dart';
 import '../presentation/screens/legal/terms_of_service_screen.dart';
 import '../presentation/screens/legal/help_support_screen.dart';
+import '../presentation/screens/settings/background_setup_screen.dart';
 
 class AppRoutes {
   static const String splash = '/';
@@ -40,6 +41,7 @@ class AppRoutes {
   static const String privacy = '/privacy';
   static const String terms = '/terms';
   static const String helpSupport = '/help-support';
+  static const String backgroundSetup = '/background-setup';
 
   static Route<dynamic> generateRoute(RouteSettings settings) {
     switch (settings.name) {
@@ -101,6 +103,8 @@ class AppRoutes {
         return _buildRoute(const TermsOfServiceScreen());
       case helpSupport:
         return _buildRoute(const HelpSupportScreen());
+      case backgroundSetup:
+        return _buildRoute(const BackgroundSetupScreen());
       default:
         return _buildRoute(const SplashScreen());
     }

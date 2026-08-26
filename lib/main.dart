@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'firebase_options.dart';
 import 'app.dart';
+import 'services/notification_service.dart';
+import 'services/tracker_watchdog.dart';
 
 void main() async {
   // Ensure Flutter is initialized
@@ -41,6 +44,16 @@ void main() async {
       return;
     }
   }
+
+  // Registered here rather than in NotificationService so that a wake-up push
+  // can still revive the tracker when the app is launched straight into the
+  // background and never reaches permission setup.
+  FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+
+  // Registers the WorkManager callback used to restart the location service
+  // after a vendor cleaner kills the process. The job itself is scheduled once
+  // the user is in a nest.
+  await TrackerWatchdog.initialize();
 
   // NOTE: NotificationService and BackgroundLocationService are now initialized
   // in the PermissionsScreen AFTER the user grants permissions.

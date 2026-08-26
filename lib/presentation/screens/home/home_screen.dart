@@ -12,6 +12,7 @@ import 'package:permission_handler/permission_handler.dart' as handler;
 import '../../../config/theme_config.dart';
 import '../../../config/routes.dart';
 import '../../../services/background_service.dart';
+import '../../../services/device_optimization_service.dart';
 import '../../../services/family_service.dart';
 import '../../../services/location_service.dart';
 import '../../../services/notification_service.dart';
@@ -41,9 +42,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _checkPermissions();
     
     // Check for OTA updates after frame renders
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      UpdateService().checkForUpdates(context);
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      // Sequential so the setup screen never lands on top of an update dialog.
+      await UpdateService().checkForUpdates(context);
+      await _maybePromptBackgroundSetup();
     });
+  }
+
+  /// Vendor power management silently stops location sharing, so on the skins
+  /// known to do it the user is walked through the fix once rather than being
+  /// left to discover a stale map days later.
+  Future<void> _maybePromptBackgroundSetup() async {
+    if (!await DeviceOptimizationService().shouldAutoPrompt()) return;
+    if (!mounted) return;
+    await Navigator.pushNamed(context, AppRoutes.backgroundSetup);
   }
 
   @override
@@ -1596,11 +1608,18 @@ class SettingsContent extends StatefulWidget {
 class _SettingsContentState extends State<SettingsContent> {
   bool _notificationsEnabled = true;
   bool _locationSharingEnabled = true;
+  bool _backgroundSetupNeeded = false;
 
   @override
   void initState() {
     super.initState();
     _loadLocationSharingPreference();
+    _loadBackgroundHealth();
+  }
+
+  Future<void> _loadBackgroundHealth() async {
+    final needed = await DeviceOptimizationService().shouldPromptSetup();
+    if (mounted) setState(() => _backgroundSetupNeeded = needed);
   }
 
   Future<void> _loadLocationSharingPreference() async {
@@ -2385,6 +2404,19 @@ class _SettingsContentState extends State<SettingsContent> {
                   },
                   activeColor: AppTheme.primaryColor,
                 )),
+            _buildSettingsTile(
+              context,
+              'Background Updates',
+              Icons.battery_charging_full_rounded,
+              () async {
+                await Navigator.pushNamed(context, AppRoutes.backgroundSetup);
+                await _loadBackgroundHealth();
+              },
+              trailing: _backgroundSetupNeeded
+                  ? const Icon(Icons.warning_amber_rounded,
+                      color: AppTheme.warningColor)
+                  : null,
+            ),
           ]),
           const SizedBox(height: 16),
           _buildSettingsSection(context, 'Family', [

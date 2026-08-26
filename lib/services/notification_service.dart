@@ -1,11 +1,14 @@
 import 'dart:async';
 import 'dart:ui';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import '../data/models/notification_model.dart';
+import '../firebase_options.dart';
+import 'tracker_watchdog.dart';
 
 /// Notification Service
 /// 
@@ -62,7 +65,7 @@ class NotificationService {
     FirebaseMessaging.onMessage.listen(_handleForegroundMessage);
 
     // Handle background/terminated messages
-    FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+    FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
 
     // Handle notification taps
     FirebaseMessaging.onMessageOpenedApp.listen(_handleNotificationTap);
@@ -247,6 +250,12 @@ class NotificationService {
   void _handleForegroundMessage(RemoteMessage message) {
     final notification = message.notification;
     final data = message.data;
+
+    // Silent wake-up: repair the tracker without showing anything.
+    if (data['type'] == kWakeTrackerMessageType) {
+      TrackerWatchdog.reviveIfNeeded(trigger: 'fcm-foreground');
+      return;
+    }
 
     if (notification == null) return;
 
@@ -574,18 +583,33 @@ class NotificationService {
   }
 }
 
-/// Background message handler (must be top-level function)
-@pragma('vm:entry-point')
-Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
-  // Handle background message
-  // For SOS, this should trigger a high-priority notification
-  final data = message.data;
-  final type = data['type'];
+/// Data-only push the server sends when a member's location has gone stale.
+///
+/// Delivered at high priority, which buys a short allowlist window in which the
+/// app may start a location foreground service from the background.
+const kWakeTrackerMessageType = 'wake_tracker';
 
-  if (type == 'sos') {
-    // SOS notification will be handled by the system
-    // The notification payload should already be configured for high priority
+/// Background message handler (must be top-level function).
+@pragma('vm:entry-point')
+Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  final type = message.data['type'];
+
+  if (type == kWakeTrackerMessageType) {
+    try {
+      if (Firebase.apps.isEmpty) {
+        await Firebase.initializeApp(
+          options: DefaultFirebaseOptions.currentPlatform,
+        );
+      }
+    } catch (e) {
+      debugPrint('Wake-up handler: Firebase init failed: $e');
+    }
+    await TrackerWatchdog.reviveIfNeeded(trigger: 'fcm');
+    return;
   }
+
+  // SOS and other alerts arrive with a notification payload, so the system
+  // displays them without any work here.
 }
 
 

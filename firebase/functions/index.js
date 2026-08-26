@@ -31,6 +31,17 @@ const LOW_BATTERY_THRESHOLD = 20;
 // Do not re-alert about the same phone more often than this.
 const LOW_BATTERY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 
+// A tracker that has not published for this long has almost certainly been
+// killed by the OS rather than merely throttled: the client's own watchdog
+// publishes at least every few minutes while it is alive.
+const TRACKER_STALE_MS = 20 * 60 * 1000;
+// Minimum gap between wake-up pushes to the same device.
+const WAKE_COOLDOWN_MS = 20 * 60 * 1000;
+// After this many consecutive failures the device is treated as switched off
+// or out of coverage, and retries drop to the longer interval below.
+const WAKE_GIVE_UP_AFTER = 4;
+const WAKE_BACKOFF_MS = 2 * 60 * 60 * 1000;
+
 // ============== LOCATION TRIGGER ==============
 
 /**
@@ -527,6 +538,102 @@ exports.cleanupOldNotifications = onSchedule('0 3 * * *', async () => {
   await batch.commit();
 
   console.log(`Deleted ${stale.size} stale notifications`);
+  return null;
+});
+
+// ============== TRACKER REVIVAL ==============
+
+/**
+ * Wakes devices whose location has gone stale.
+ *
+ * Manufacturer power managers (MIUI's cleaner, Samsung's app sleep, and their
+ * equivalents) force stop the location foreground service even when the app
+ * holds a battery-optimisation exemption, and Android does not restart it
+ * afterwards. Left alone the device silently reports an hours-old position
+ * until someone opens the app.
+ *
+ * A data-only high priority message is the remedy: it is delivered to a
+ * process that was killed but not force stopped by the user, shows nothing,
+ * and buys the app a short allowlist window in which it may restart a location
+ * foreground service. The client handles it in firebaseMessagingBackgroundHandler.
+ *
+ * Runs every 15 minutes.
+ */
+exports.wakeStaleTrackers = onSchedule('*/15 * * * *', async () => {
+  const now = Date.now();
+  const families = (await rtdb.ref('locations').get()).val() || {};
+
+  // A user can share with several nests; the freshest write across all of them
+  // decides whether their device is actually stale.
+  const freshestByUser = new Map();
+
+  for (const members of Object.values(families)) {
+    for (const [userId, location] of Object.entries(members || {})) {
+      // Sharing that was deliberately paused is not a fault to repair.
+      if (!location || location.isActive === false) continue;
+      const timestamp = toFiniteNumber(location.timestamp) || 0;
+      const previous = freshestByUser.get(userId) || 0;
+      if (timestamp > previous) freshestByUser.set(userId, timestamp);
+    }
+  }
+
+  const stale = Array.from(freshestByUser.entries())
+    .filter(([, timestamp]) => now - timestamp > TRACKER_STALE_MS);
+
+  if (stale.length === 0) return null;
+
+  const attempts = (await rtdb.ref('wakeAttempts').get()).val() || {};
+  const toWake = [];
+  const attemptUpdates = {};
+
+  for (const [userId, timestamp] of stale) {
+    const record = attempts[userId] || {};
+    const lastAttempt = toFiniteNumber(record.lastAttempt) || 0;
+
+    // A newer position than the one that triggered the last attempt means the
+    // device came back, so the failure streak starts again from zero.
+    const recovered = timestamp > (toFiniteNumber(record.staleSince) || 0);
+    const consecutive = recovered ? 0 : (toFiniteNumber(record.consecutive) || 0);
+
+    const cooldown = consecutive >= WAKE_GIVE_UP_AFTER
+      ? WAKE_BACKOFF_MS
+      : WAKE_COOLDOWN_MS;
+
+    if (now - lastAttempt < cooldown) continue;
+
+    toWake.push(userId);
+    attemptUpdates[userId] = {
+      lastAttempt: now,
+      staleSince: timestamp,
+      consecutive: consecutive + 1,
+    };
+  }
+
+  if (toWake.length === 0) return null;
+
+  await pushToUsers(toWake, {
+    // No `notification` block: this must stay invisible to the user.
+    data: {
+      type: 'wake_tracker',
+      sentAt: String(now),
+    },
+    android: {
+      priority: 'high',
+    },
+    apns: {
+      headers: {
+        'apns-priority': '5',
+        'apns-push-type': 'background',
+      },
+      payload: {
+        aps: { 'content-available': 1 },
+      },
+    },
+  });
+
+  await rtdb.ref('wakeAttempts').update(attemptUpdates);
+
+  console.log(`Sent wake-up push to ${toWake.length} stale tracker(s)`);
   return null;
 });
 

@@ -14,6 +14,7 @@ import 'package:permission_handler/permission_handler.dart' as permission_handle
 import '../config/app_config.dart';
 import '../firebase_options.dart';
 import 'location_cache_service.dart';
+import 'tracker_watchdog.dart';
 import 'dart:math' as math;
 
 /// Keys used to share state between the UI isolate and the background isolate.
@@ -159,10 +160,14 @@ class BackgroundLocationService {
     );
     await start();
     forceUpdate();
+    // Outlives this process, so the tracker comes back if an OEM cleaner
+    // kills it while nobody is looking at the phone.
+    await TrackerWatchdog.schedule();
   }
 
   /// Clear user data (call on sign-out)
   Future<void> clearUser() async {
+    await TrackerWatchdog.cancel();
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(BgPrefsKeys.userId);
     await prefs.remove(BgPrefsKeys.familyIds);
@@ -254,6 +259,48 @@ class BackgroundServiceDiagnostics {
       isRunning &&
       lastPush != null &&
       DateTime.now().difference(lastPush!).inMinutes < 10;
+
+  /// When [lastError] was recorded. Entries are stored as
+  /// `<iso8601> <status>: <details>`.
+  DateTime? get lastErrorAt {
+    final raw = lastError;
+    if (raw == null) return null;
+    final firstSpace = raw.indexOf(' ');
+    if (firstSpace <= 0) return null;
+    return DateTime.tryParse(raw.substring(0, firstSpace));
+  }
+
+  /// A sentence the user can act on, or null when there is nothing to report.
+  ///
+  /// The raw entry is an internal status code and an exception's `toString()`,
+  /// which is useful in a log and meaningless on screen.
+  String? get problem {
+    final raw = lastError;
+    if (raw == null) return null;
+
+    // A fix that landed after the failure means it already recovered.
+    final at = lastErrorAt;
+    if (at != null && lastPush != null && !lastPush!.isBefore(at)) return null;
+
+    final text = raw.toLowerCase();
+    if (text.contains('location service on the device is disabled')) {
+      return 'Location is switched off on this phone. Turn it on to keep '
+          'sharing.';
+    }
+    if (text.contains('permission')) {
+      return 'Flockar no longer has permission to read your location.';
+    }
+    if (text.contains('timeout') || text.contains('timeoutexception')) {
+      return 'Could not get a GPS fix. This usually clears once you are '
+          'outdoors again.';
+    }
+    if (text.contains('network') ||
+        text.contains('socket') ||
+        text.contains('unavailable')) {
+      return 'No connection, so the last position has not been uploaded yet.';
+    }
+    return 'Sharing hit a problem and is retrying in the background.';
+  }
 }
 
 /// Main background service entry point
@@ -606,6 +653,9 @@ Future<void> onStart(ServiceInstance service) async {
       if (published) {
         try {
           await store.setString(BgPrefsKeys.lastPush, now.toIso8601String());
+          // Whatever went wrong earlier is over: without this the last failure
+          // stays pinned in the settings UI next to a live "Sharing is live".
+          await store.remove(BgPrefsKeys.lastError);
         } catch (_) {}
         await log('publishing');
         service.invoke('locationUpdate', data);
