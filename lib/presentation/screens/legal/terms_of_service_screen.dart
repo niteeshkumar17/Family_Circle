@@ -416,7 +416,7 @@ class TermsOfServiceScreen extends StatelessWidget {
               Icon(Icons.language_rounded, size: 16, color: Color(0xFF6C63FF)),
               SizedBox(width: 8),
               Text(
-                'https://flockar.niteeshkumar.online/terms',
+                'https://flockar.niteeshkumar.fun/terms.html',
                 style: TextStyle(
                   fontSize: 14,
                   color: Color(0xFF6C63FF),

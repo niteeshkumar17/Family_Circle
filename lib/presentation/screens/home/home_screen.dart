@@ -213,7 +213,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   );
                 }),
                 _buildDrawerItem(Icons.share_outlined, 'Share App', () {
-                  Share.share('Keep your family safe and connected with Flockar! 🛡️\n\nGet the app for free: https://flockar.niteeshkumar.online', subject: 'Check out Flockar!');
+                  Share.share('Keep your family safe and connected with Flockar! 🛡️\n\nGet the app for free: https://flockar.niteeshkumar.fun', subject: 'Check out Flockar!');
                 }),
                 _buildDrawerItem(Icons.privacy_tip_outlined, 'Privacy Policy', () {
                   Navigator.pushNamed(context, AppRoutes.privacy);
@@ -2113,7 +2113,7 @@ class _SettingsContentState extends State<SettingsContent> {
                       onPressed: () async {
                         Navigator.pop(context);
                         await Share.share(
-                          'You\'re invited to join my secure Nest on Flockar! 🛡️\n\nTo join, enter this invite code in the app: $inviteCode\n\nDownload the app here: https://flockar.niteeshkumar.online',
+                          'You\'re invited to join my secure Nest on Flockar! 🛡️\n\nTo join, enter this invite code in the app: $inviteCode\n\nDownload the app here: https://flockar.niteeshkumar.fun',
                           subject: 'Join my Nest on Flockar',
                         );
                       },

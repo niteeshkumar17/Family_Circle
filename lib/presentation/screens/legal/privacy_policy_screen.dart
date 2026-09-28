@@ -417,7 +417,7 @@ class PrivacyPolicyScreen extends StatelessWidget {
               Icon(Icons.language_rounded, size: 16, color: AppTheme.primaryColor),
               SizedBox(width: 8),
               Text(
-                'https://flockar.niteeshkumar.online/privacy',
+                'https://flockar.niteeshkumar.fun/privacy.html',
                 style: TextStyle(
                   fontSize: 14,
                   color: AppTheme.primaryColor,
