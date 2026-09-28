@@ -175,8 +175,8 @@ class HelpSupportScreen extends StatelessWidget {
                       _FAQItem(
                         question: 'Does location tracking drain my battery?',
                         answer: '$_appName uses a battery-optimised tracking algorithm that adjusts update frequency based on your movement speed. '
-                            'When stationary, updates are less frequent to conserve battery. During movement, updates increase for accuracy. '
-                            'Typical battery impact is 2–5% per day.',
+                            'When you stop moving for a few minutes the GPS radio is turned off and the app only takes a cheap Wi‑Fi/cell check every few minutes. '
+                            'Typical overnight drain is a few percent, not tens of percent. '
                       ),
                     ],
                   ),

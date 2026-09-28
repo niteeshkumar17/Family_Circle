@@ -376,7 +376,11 @@ class _BackgroundSetupScreenState extends State<BackgroundSetupScreen>
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  healthy ? 'Sharing is live' : 'Not sharing right now',
+                  !healthy
+                      ? 'Not sharing right now'
+                      : (diagnostics?.isResting ?? false)
+                          ? 'Sharing on, saving battery'
+                          : 'Sharing is live',
                   style: const TextStyle(
                     color: Colors.white,
                     fontWeight: FontWeight.w600,

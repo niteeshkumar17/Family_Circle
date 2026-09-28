@@ -35,6 +35,9 @@ class BgPrefsKeys {
   static const lastLat = 'bg_last_lat';
   static const lastLng = 'bg_last_lng';
   static const status = 'bg_service_status';
+
+  /// 'moving' or 'resting'; see the motion regime notes in [AppConfig].
+  static const mode = 'bg_service_mode';
   static const lastError = 'bg_service_last_error';
   static const lastPush = 'bg_service_last_push';
   static const lastFix = 'bg_service_last_fix';
@@ -227,6 +230,7 @@ class BackgroundLocationService {
     return BackgroundServiceDiagnostics(
       isRunning: await _service.isRunning(),
       status: prefs.getString(BgPrefsKeys.status) ?? 'unknown',
+      mode: prefs.getString(BgPrefsKeys.mode),
       lastError: prefs.getString(BgPrefsKeys.lastError),
       lastPush: _parseDate(prefs.getString(BgPrefsKeys.lastPush)),
       lastFix: _parseDate(prefs.getString(BgPrefsKeys.lastFix)),
@@ -241,6 +245,7 @@ class BackgroundLocationService {
 class BackgroundServiceDiagnostics {
   final bool isRunning;
   final String status;
+  final String? mode;
   final String? lastError;
   final DateTime? lastPush;
   final DateTime? lastFix;
@@ -249,16 +254,22 @@ class BackgroundServiceDiagnostics {
   const BackgroundServiceDiagnostics({
     required this.isRunning,
     required this.status,
+    this.mode,
     this.lastError,
     this.lastPush,
     this.lastFix,
     this.lastStart,
   });
 
-  bool get isHealthy =>
-      isRunning &&
-      lastPush != null &&
-      DateTime.now().difference(lastPush!).inMinutes < 10;
+  bool get isResting => mode == 'resting';
+
+  bool get isHealthy {
+    if (!isRunning || lastPush == null) return false;
+    // Resting only heartbeats every 5–10 minutes; a 10-minute window would
+    // flip the health card red between ticks even though nothing is wrong.
+    final limitMinutes = isResting ? 15 : 10;
+    return DateTime.now().difference(lastPush!).inMinutes < limitMinutes;
+  }
 
   /// When [lastError] was recorded. Entries are stored as
   /// `<iso8601> <status>: <details>`.
@@ -363,6 +374,7 @@ Future<void> onStart(ServiceInstance service) async {
 
     int trackingIntervalSeconds = AppConfig.locationUpdateIntervalSeconds;
     int subscribedIntervalSeconds = -1;
+    LocationAccuracy? subscribedAccuracy;
 
     double? lastLat;
     double? lastLng;
@@ -372,10 +384,32 @@ Future<void> onStart(ServiceInstance service) async {
 
     DateTime? lastPublishTime;
     DateTime? lastFixTime;
+    DateTime? lastPresenceWrite;
+    DateTime? lastStallRecovery;
+    String? lastNotification;
     double? lastHistoryLat;
     double? lastHistoryLng;
     DateTime? lastHistoryTime;
     String? presenceRegisteredUserId;
+
+    // Motion regime. The GPS stream stays on only while [resting] is false.
+    // A phone left on a nightstand used to keep high-accuracy GNSS running
+    // all night, which is what produced the 10% per hour drain.
+    var resting = false;
+    var deepResting = false;
+    DateTime? stillSince;
+    double? stillAnchorLat;
+    double? stillAnchorLng;
+    Timer? restTimer;
+    StreamSubscription<Position>? positionSubscription;
+
+    // Declared up front because Dart local functions cannot call a sibling
+    // that is written later in the same block.
+    late Future<void> Function(Position position) considerMotion;
+    late Future<void> Function({bool force}) subscribeToPositions;
+    late Future<void> Function() restHeartbeat;
+    late Future<void> Function() writePresence;
+    late void Function() scheduleRestHeartbeat;
 
     final battery = Battery();
     final connectivity = Connectivity();
@@ -494,7 +528,11 @@ Future<void> onStart(ServiceInstance service) async {
 
     /// Breadcrumbs are only worth storing when the user actually moved, or
     /// once enough time has passed to prove they are still somewhere.
-    bool shouldRecordHistory(double lat, double lng, DateTime now) {
+    bool shouldRecordHistory(
+        double lat, double lng, double? accuracy, DateTime now) {
+      if (accuracy != null && accuracy > AppConfig.historyMaxAccuracyMeters) {
+        return false;
+      }
       if (lastHistoryTime == null ||
           lastHistoryLat == null ||
           lastHistoryLng == null) {
@@ -521,7 +559,8 @@ Future<void> onStart(ServiceInstance service) async {
       final now = DateTime.now();
       final lat = data['latitude'] as double;
       final lng = data['longitude'] as double;
-      final recordHistory = shouldRecordHistory(lat, lng, now);
+      final recordHistory = shouldRecordHistory(
+          lat, lng, (data['accuracy'] as num?)?.toDouble(), now);
       final dateKey = '${now.year}-'
           '${now.month.toString().padLeft(2, '0')}-'
           '${now.day.toString().padLeft(2, '0')}';
@@ -599,12 +638,42 @@ Future<void> onStart(ServiceInstance service) async {
     }
 
     void setNotification(String content) {
+      if (lastNotification == content) return;
+      lastNotification = content;
       if (service is AndroidServiceInstance) {
         service.setForegroundNotificationInfo(
           title: 'Flockar',
           content: content,
         );
       }
+    }
+
+    Future<void> persistMode() async {
+      try {
+        await store.setString(
+            BgPrefsKeys.mode, resting ? 'resting' : 'moving');
+      } catch (_) {}
+    }
+
+    LocationSettings buildSettings({
+      required LocationAccuracy accuracy,
+      required int intervalSeconds,
+      double distanceFilter = 0,
+    }) {
+      if (Platform.isAndroid) {
+        return AndroidSettings(
+          accuracy: accuracy,
+          distanceFilter: distanceFilter.round(),
+          intervalDuration: Duration(seconds: intervalSeconds),
+        );
+      }
+      return AppleSettings(
+        accuracy: accuracy,
+        distanceFilter: distanceFilter.round(),
+        pauseLocationUpdatesAutomatically: !sosMode,
+        showBackgroundLocationIndicator: sosMode,
+        allowBackgroundLocationUpdates: true,
+      );
     }
 
     /// Publishes a fix, applying the interval and distance throttles.
@@ -614,6 +683,8 @@ Future<void> onStart(ServiceInstance service) async {
         await store
             .setString(BgPrefsKeys.lastFix, lastFixTime!.toIso8601String());
       } catch (_) {}
+
+      await considerMotion(position);
 
       if (userId == null || userId!.isEmpty) return;
       if (targetFamilies().isEmpty) return;
@@ -634,8 +705,14 @@ Future<void> onStart(ServiceInstance service) async {
         if (!intervalElapsed && !movedFar) return;
       }
 
-      if (!sosMode) {
-        trackingIntervalSeconds = tracker.calculateOptimalInterval(position.speed);
+      if (!sosMode && !resting) {
+        final next = tracker.calculateOptimalInterval(position.speed);
+        // Ignore one-tick speed jitter so we do not tear down and rebuild
+        // the GPS subscription every few seconds.
+        if ((next - trackingIntervalSeconds).abs() >= 15) {
+          trackingIntervalSeconds = next;
+          await subscribeToPositions();
+        }
       }
 
       final data = await buildPayload(position);
@@ -657,35 +734,171 @@ Future<void> onStart(ServiceInstance service) async {
           // stays pinned in the settings UI next to a live "Sharing is live".
           await store.remove(BgPrefsKeys.lastError);
         } catch (_) {}
-        await log('publishing');
+        await log(resting ? 'resting' : 'publishing');
         service.invoke('locationUpdate', data);
       }
     }
 
-    // ─── GPS subscription ───
-    StreamSubscription<Position>? positionSubscription;
-
-    LocationSettings buildSettings(int intervalSeconds) {
-      if (Platform.isAndroid) {
-        return AndroidSettings(
-          accuracy: LocationAccuracy.high,
-          // Let the OS wake us on movement rather than polling on a timer;
-          // the Dart-side throttle in handlePosition still caps the rate.
-          distanceFilter: 0,
-          intervalDuration: Duration(seconds: intervalSeconds),
-        );
-      }
-      return AppleSettings(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 0,
-        pauseLocationUpdatesAutomatically: false,
-        showBackgroundLocationIndicator: true,
-        allowBackgroundLocationUpdates: true,
+    double? distanceFromAnchor(Position position) {
+      if (stillAnchorLat == null || stillAnchorLng == null) return null;
+      return Geolocator.distanceBetween(
+        stillAnchorLat!,
+        stillAnchorLng!,
+        position.latitude,
+        position.longitude,
       );
     }
 
-    Future<void> subscribeToPositions({bool force = false}) async {
-      if (!force && subscribedIntervalSeconds == trackingIntervalSeconds) {
+    void resetStillAnchor(Position position) {
+      stillAnchorLat = position.latitude;
+      stillAnchorLng = position.longitude;
+      stillSince = DateTime.now();
+    }
+
+    /// Turns the GPS radio off and switches to a cheap coarse heartbeat.
+    Future<void> enterRest() async {
+      if (resting) return;
+      resting = true;
+      await positionSubscription?.cancel();
+      positionSubscription = null;
+      subscribedIntervalSeconds = -1;
+      subscribedAccuracy = null;
+      await persistMode();
+      setNotification('Sharing on, saving battery');
+      await log('resting');
+      scheduleRestHeartbeat();
+    }
+
+    scheduleRestHeartbeat = () {
+      restTimer?.cancel();
+      final period = deepResting
+          ? AppConfig.deepRestHeartbeatSeconds
+          : AppConfig.stationaryHeartbeatSeconds;
+      restTimer = Timer.periodic(
+        Duration(seconds: period),
+        (_) => restHeartbeat(),
+      );
+    };
+
+    Future<void> wakeFromRest() async {
+      if (!resting) return;
+      resting = false;
+      deepResting = false;
+      restTimer?.cancel();
+      restTimer = null;
+      stillSince = DateTime.now();
+      await persistMode();
+      setNotification('Location sharing is active');
+      await log('moving');
+      await subscribeToPositions(force: true);
+    }
+
+    /// Cheap WiFi/cell sample used instead of GNSS while the phone is still.
+    restHeartbeat = () async {
+      await writePresence();
+
+      final stillFor = stillSince == null
+          ? 0
+          : DateTime.now().difference(stillSince!).inSeconds;
+      if (!deepResting && stillFor >= AppConfig.deepRestAfterSeconds) {
+        deepResting = true;
+        scheduleRestHeartbeat();
+      }
+
+      if (!await Geolocator.isLocationServiceEnabled()) {
+        await log('location_services_off');
+        return;
+      }
+
+      Position? position;
+      try {
+        position = await Geolocator.getCurrentPosition(
+          locationSettings: buildSettings(
+            accuracy: LocationAccuracy.low,
+            intervalSeconds: 10,
+          ),
+        ).timeout(const Duration(seconds: 8));
+      } catch (_) {
+        try {
+          position = await Geolocator.getLastKnownPosition();
+        } catch (_) {}
+      }
+
+      if (position == null) return;
+      await handlePosition(position, force: true);
+    };
+
+    considerMotion = (Position position) async {
+      if (sosMode) {
+        if (resting) await wakeFromRest();
+        resetStillAnchor(position);
+        return;
+      }
+
+      final fromAnchor = distanceFromAnchor(position);
+      // Indoor GNSS jumps tens of metres without the phone moving. A jump
+      // smaller than the reported uncertainty is treated as noise so a
+      // nightstand never looks like a departure.
+      final realMove = fromAnchor != null &&
+          fromAnchor > position.accuracy &&
+          fromAnchor > 0;
+
+      if (resting) {
+        if (realMove && fromAnchor >= AppConfig.stationaryExitMeters) {
+          resetStillAnchor(position);
+          await wakeFromRest();
+        }
+        return;
+      }
+
+      if (fromAnchor == null ||
+          (realMove && fromAnchor > AppConfig.stationaryRadiusMeters)) {
+        resetStillAnchor(position);
+        return;
+      }
+
+      if (stillSince != null &&
+          DateTime.now().difference(stillSince!).inSeconds >=
+              AppConfig.stationaryAfterSeconds) {
+        await enterRest();
+      }
+    };
+
+    writePresence = () async {
+      final uid = userId;
+      if (uid == null || uid.isEmpty) return;
+      if (lastPresenceWrite != null &&
+          DateTime.now().difference(lastPresenceWrite!).inSeconds < 240) {
+        return;
+      }
+      try {
+        await database.ref('presence/$uid').set({
+          'online': true,
+          'lastSeen': DateTime.now().millisecondsSinceEpoch,
+          'appState': appVisible ? 'foreground' : 'background',
+        });
+        await configurePresenceOnDisconnect(uid);
+        lastPresenceWrite = DateTime.now();
+      } catch (e) {
+        await log('presence_failed', error: e);
+      }
+    };
+
+    LocationAccuracy movingAccuracy() {
+      if (sosMode) return LocationAccuracy.high;
+      if (trackingIntervalSeconds <= AppConfig.drivingIntervalSeconds) {
+        return LocationAccuracy.high;
+      }
+      return LocationAccuracy.medium;
+    }
+
+    subscribeToPositions = ({bool force = false}) async {
+      if (resting && !sosMode) return;
+
+      final accuracy = movingAccuracy();
+      if (!force &&
+          subscribedIntervalSeconds == trackingIntervalSeconds &&
+          subscribedAccuracy == accuracy) {
         return;
       }
 
@@ -705,21 +918,27 @@ Future<void> onStart(ServiceInstance service) async {
 
       await positionSubscription?.cancel();
       subscribedIntervalSeconds = trackingIntervalSeconds;
+      subscribedAccuracy = accuracy;
 
       positionSubscription = Geolocator.getPositionStream(
-        locationSettings: buildSettings(trackingIntervalSeconds),
+        locationSettings: buildSettings(
+          accuracy: accuracy,
+          intervalSeconds: trackingIntervalSeconds,
+          distanceFilter: AppConfig.publishMinDistanceMeters,
+        ),
       ).listen(
         (position) => handlePosition(position),
         onError: (Object e) {
           // Surface the failure instead of hiding it; the watchdog will retry.
           log('position_stream_error', error: e);
           subscribedIntervalSeconds = -1;
+          subscribedAccuracy = null;
         },
         cancelOnError: false,
       );
 
       await log('tracking');
-    }
+    };
 
     await reloadIdentity();
     if (userId != null && userId!.isNotEmpty) {
@@ -740,7 +959,25 @@ Future<void> onStart(ServiceInstance service) async {
       }
     } catch (_) {}
 
-    await subscribeToPositions(force: true);
+    // Resume the cheap regime if we were still when the process last died,
+    // so a vendor-cleaner restart does not immediately turn GPS back on.
+    final savedMode = store.getString(BgPrefsKeys.mode);
+    final savedPush =
+        DateTime.tryParse(store.getString(BgPrefsKeys.lastPush) ?? '');
+    final recentlyPublished = savedPush != null &&
+        DateTime.now().difference(savedPush).inMinutes < 15;
+    if (savedMode == 'resting' &&
+        recentlyPublished &&
+        lastLat != null &&
+        lastLng != null) {
+      stillAnchorLat = lastLat;
+      stillAnchorLng = lastLng;
+      stillSince = savedPush;
+      await enterRest();
+      await restHeartbeat();
+    } else {
+      await subscribeToPositions(force: true);
+    }
 
     // ─── Commands from the UI isolate ───
     if (service is AndroidServiceInstance) {
@@ -749,6 +986,8 @@ Future<void> onStart(ServiceInstance service) async {
     }
 
     service.on('stopService').listen((_) async {
+      restTimer?.cancel();
+      restTimer = null;
       await positionSubscription?.cancel();
       final uid = userId;
       if (uid != null && uid.isNotEmpty) {
@@ -850,10 +1089,24 @@ Future<void> onStart(ServiceInstance service) async {
     service.on('forceUpdate').listen((_) async {
       try {
         final position = await Geolocator.getCurrentPosition(
-          locationSettings: buildSettings(1),
-        ).timeout(const Duration(seconds: 20));
+          locationSettings: buildSettings(
+            accuracy: sosMode
+                ? LocationAccuracy.high
+                : resting
+                    ? LocationAccuracy.low
+                    : LocationAccuracy.medium,
+            intervalSeconds: 5,
+          ),
+        ).timeout(Duration(seconds: resting ? 8 : 15));
         await handlePosition(position, force: true);
       } catch (e) {
+        try {
+          final last = await Geolocator.getLastKnownPosition();
+          if (last != null) {
+            await handlePosition(last, force: true);
+            return;
+          }
+        } catch (_) {}
         await log('force_update_failed', error: e);
       }
     });
@@ -861,11 +1114,15 @@ Future<void> onStart(ServiceInstance service) async {
     service.on('enableSOSMode').listen((_) async {
       sosMode = true;
       trackingIntervalSeconds = AppConfig.sosTrackingIntervalSeconds;
-      await subscribeToPositions();
+      if (resting) await wakeFromRest();
+      await subscribeToPositions(force: true);
       setNotification('Emergency mode - sharing live location');
       try {
         final position = await Geolocator.getCurrentPosition(
-          locationSettings: buildSettings(1),
+          locationSettings: buildSettings(
+            accuracy: LocationAccuracy.high,
+            intervalSeconds: 1,
+          ),
         ).timeout(const Duration(seconds: 20));
         await handlePosition(position, force: true);
       } catch (e) {
@@ -881,13 +1138,14 @@ Future<void> onStart(ServiceInstance service) async {
     });
 
     // ════════════════════════════════════════════════════════════════════════
-    // WATCHDOG — presence heartbeat plus recovery when the GPS stream stalls.
+    // WATCHDOG — presence plus recovery when the *moving* GPS stream stalls.
     //
-    // The stream is the primary source of fixes. This timer only exists to
-    // notice when it has gone quiet (revoked permission, disabled location
-    // services, an OEM killing the subscription) and to repair it.
+    // Resting is not a stall: the radio is off on purpose. Hunting for a
+    // high-accuracy fix every couple of minutes indoors is what used to burn
+    // the battery all night. Presence is also throttled; a write every minute
+    // kept the radio awake for no benefit.
     // ════════════════════════════════════════════════════════════════════════
-    Timer.periodic(const Duration(seconds: 60), (timer) async {
+    Timer.periodic(const Duration(seconds: 90), (timer) async {
       await reloadIdentity();
 
       final uid = userId;
@@ -897,18 +1155,7 @@ Future<void> onStart(ServiceInstance service) async {
         return;
       }
 
-      final now = DateTime.now();
-
-      try {
-        await database.ref('presence/$uid').set({
-          'online': true,
-          'lastSeen': now.millisecondsSinceEpoch,
-          'appState': appVisible ? 'foreground' : 'background',
-        });
-        await configurePresenceOnDisconnect(uid);
-      } catch (e) {
-        await log('presence_failed', error: e);
-      }
+      await writePresence();
 
       if (targetFamilies().isEmpty) {
         setNotification('Location sharing is paused');
@@ -916,28 +1163,49 @@ Future<void> onStart(ServiceInstance service) async {
         return;
       }
 
+      if (resting) {
+        if (restTimer == null || restTimer!.isActive == false) {
+          scheduleRestHeartbeat();
+        }
+        return;
+      }
+
       setNotification('Location sharing is active');
 
-      // Recover a dead subscription. Unlike the previous implementation this
-      // never re-subscribes in a tight loop: it only acts once the stream has
-      // actually been silent, so a slow first fix is given time to arrive.
+      final now = DateTime.now();
       final staleFor = lastFixTime == null
           ? now.difference(DateTime.fromMillisecondsSinceEpoch(
               store.getInt('bg_service_started_at') ??
                   now.millisecondsSinceEpoch))
           : now.difference(lastFixTime!);
 
-      if (staleFor.inSeconds >= AppConfig.watchdogStaleSeconds) {
-        await log('stream_stalled');
-        await subscribeToPositions(force: true);
-        try {
-          final position = await Geolocator.getCurrentPosition(
-            locationSettings: buildSettings(1),
-          ).timeout(const Duration(seconds: 25));
-          await handlePosition(position, force: true);
-        } catch (e) {
-          await log('watchdog_fix_failed', error: e);
+      if (staleFor.inSeconds < AppConfig.watchdogStaleSeconds) return;
+      if (lastStallRecovery != null &&
+          now.difference(lastStallRecovery!).inSeconds <
+              AppConfig.stallRecoveryCooldownSeconds) {
+        return;
+      }
+      lastStallRecovery = now;
+
+      await log('stream_stalled');
+      await subscribeToPositions(force: true);
+      try {
+        final last = await Geolocator.getLastKnownPosition();
+        if (last != null) {
+          await handlePosition(last, force: true);
+          return;
         }
+      } catch (_) {}
+      try {
+        final position = await Geolocator.getCurrentPosition(
+          locationSettings: buildSettings(
+            accuracy: LocationAccuracy.medium,
+            intervalSeconds: 5,
+          ),
+        ).timeout(const Duration(seconds: 10));
+        await handlePosition(position, force: true);
+      } catch (e) {
+        await log('watchdog_fix_failed', error: e);
       }
     });
 
@@ -989,15 +1257,21 @@ Future<void> onStart(ServiceInstance service) async {
                 freshestByFamily[familyId] = rowTimestamp;
               }
 
-              // History is append-only, so a late arrival is always welcome.
-              final ts = DateTime.fromMillisecondsSinceEpoch(rowTimestamp);
-              final dateKey = '${ts.year}-'
-                  '${ts.month.toString().padLeft(2, '0')}-'
-                  '${ts.day.toString().padLeft(2, '0')}';
-              await database
-                  .ref(
-                      'locationHistory/$familyId/$rowUser/$dateKey/$rowTimestamp')
-                  .set(cache.rowToLocationData(row));
+              // History is append-only, so a late arrival is always welcome,
+              // but it gets the same precision bar as a live write.
+              final rowData = cache.rowToLocationData(row);
+              final rowAccuracy = (rowData['accuracy'] as num?)?.toDouble();
+              if (rowAccuracy == null ||
+                  rowAccuracy <= AppConfig.historyMaxAccuracyMeters) {
+                final ts = DateTime.fromMillisecondsSinceEpoch(rowTimestamp);
+                final dateKey = '${ts.year}-'
+                    '${ts.month.toString().padLeft(2, '0')}-'
+                    '${ts.day.toString().padLeft(2, '0')}';
+                await database
+                    .ref(
+                        'locationHistory/$familyId/$rowUser/$dateKey/$rowTimestamp')
+                    .set(rowData);
+              }
 
               syncedIds.add(row['id'] as int);
             } catch (e) {
