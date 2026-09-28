@@ -105,7 +105,13 @@ flutter_icons:
     generate: true
     image_path: "assets/icons/app_icon.jpg"
     background_color: "#FFFFFF"
-# Remove overrides
+
+dependency_overrides:
+  # firebase_auth 4.16.0 ships native code for this interface version. Newer
+  # 7.x releases changed the message format, which makes Google sign-in fail
+  # with "List<Object?> is not a subtype of PigeonUserDetails?" even though
+  # the sign-in itself succeeded. Drop this when moving to firebase_core 3.x.
+  firebase_auth_platform_interface: 7.0.9
 
 flutter:
   uses-material-design: true
