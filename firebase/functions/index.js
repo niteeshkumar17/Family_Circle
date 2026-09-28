@@ -239,7 +239,7 @@ async function checkLowBattery(familyId, userId, userName, newData) {
         batteryLevel: String(battery),
       },
       android: { notification: { channelId: 'system_alerts' } },
-    }),
+    }, { category: 'battery' }),
   ]);
 }
 
@@ -332,10 +332,195 @@ exports.broadcastSOS = onDocumentCreated('sos_events/{eventId}', async (event) =
   return null;
 });
 
-// ============== FAMILY INVITE ==============
+// ============== FAMILY MEMBERSHIP ==============
+//
+// Joining and creating nests happens here rather than on the client. Firestore
+// rules cannot let a stranger look a family up by invite code without also
+// letting them read every family, and a client that can write its own
+// membership document (or its own `family_members` index) can read any nest's
+// live locations and history.
+
+const INVITE_CODE_LENGTH = 6;
+const INVITE_CODE_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_FAMILY_NAME_LENGTH = 50;
+// Six characters from 36 symbols is ~2 billion codes; capping failed guesses
+// per account keeps enumeration impractical.
+const JOIN_MAX_FAILURES = 10;
+const JOIN_FAILURE_WINDOW_MS = 60 * 60 * 1000;
+// AppConfig.maxPremiumFamilyMembers. The free-tier limit is not enforced
+// because there is no paid tier yet.
+const MAX_FAMILY_MEMBERS = 20;
+
+async function resolveProfile(uid, token) {
+  const snap = await db.collection('users').doc(uid).get();
+  const data = snap.data() || {};
+  return {
+    displayName: data.displayName || data.name || token?.name || 'User',
+    photoUrl: data.photoUrl || token?.picture || null,
+  };
+}
+
+async function newInviteCodeFields(uid) {
+  return {
+    inviteCode: await generateUniqueFamilyInviteCode(INVITE_CODE_LENGTH),
+    inviteCodeExpiresAt: new Date(Date.now() + INVITE_CODE_TTL_MS),
+    inviteCodeGeneratedBy: uid,
+    inviteCodeGeneratedAt: FieldValue.serverTimestamp(),
+  };
+}
+
+async function assertJoinAllowed(uid) {
+  const snap = await rtdb.ref(`joinAttempts/${uid}`).get();
+  const attempts = snap.val();
+  if (!attempts) return;
+  const withinWindow = Date.now() - (attempts.windowStart || 0) < JOIN_FAILURE_WINDOW_MS;
+  if (withinWindow && (attempts.failures || 0) >= JOIN_MAX_FAILURES) {
+    throw new HttpsError(
+      'resource-exhausted',
+      'Too many incorrect codes. Please wait an hour and try again.'
+    );
+  }
+}
+
+async function recordJoinFailure(uid) {
+  await rtdb.ref(`joinAttempts/${uid}`).transaction((current) => {
+    const now = Date.now();
+    if (!current || now - (current.windowStart || 0) >= JOIN_FAILURE_WINDOW_MS) {
+      return { failures: 1, windowStart: now };
+    }
+    return { failures: (current.failures || 0) + 1, windowStart: current.windowStart };
+  });
+}
 
 /**
- * Generates a unique invite code for a family
+ * Creates a nest with the caller as its admin.
+ */
+exports.createFamily = onCall(async (request) => {
+  if (!request.auth) {
+    throw new HttpsError('unauthenticated', 'Must be logged in');
+  }
+
+  const uid = request.auth.uid;
+  const name = String(request.data?.name || '').trim();
+  if (!name) {
+    throw new HttpsError('invalid-argument', 'Please enter a nest name');
+  }
+  if (name.length > MAX_FAMILY_NAME_LENGTH) {
+    throw new HttpsError('invalid-argument', 'Nest name is too long');
+  }
+
+  const profile = await resolveProfile(uid, request.auth.token);
+  const familyRef = db.collection('families').doc();
+  const userRef = db.collection('users').doc(uid);
+
+  const batch = db.batch();
+  batch.set(familyRef, {
+    name,
+    createdBy: uid,
+    createdByName: profile.displayName,
+    createdAt: FieldValue.serverTimestamp(),
+    memberIds: [uid],
+    ...(await newInviteCodeFields(uid)),
+  });
+  batch.set(familyRef.collection('members').doc(uid), {
+    userId: uid,
+    displayName: profile.displayName,
+    photoUrl: profile.photoUrl,
+    role: 'admin',
+    joinedAt: FieldValue.serverTimestamp(),
+    locationSharingEnabled: true,
+  });
+  batch.set(userRef, {
+    familyIds: FieldValue.arrayUnion(familyRef.id),
+    currentFamilyId: familyRef.id,
+  }, { merge: true });
+  await batch.commit();
+
+  // Written here as well as by onMemberAdded so the creator can read the
+  // nest's locations the moment this call returns.
+  await rtdb.ref(`family_members/${familyRef.id}/${uid}`).set(true);
+
+  return { familyId: familyRef.id };
+});
+
+/**
+ * Adds the caller to the nest that owns a valid, unexpired invite code.
+ */
+exports.joinFamily = onCall(async (request) => {
+  if (!request.auth) {
+    throw new HttpsError('unauthenticated', 'Must be logged in');
+  }
+
+  const uid = request.auth.uid;
+  const code = String(request.data?.inviteCode || '').trim().toUpperCase();
+  if (!/^[A-Z0-9]{6}$/.test(code)) {
+    throw new HttpsError('invalid-argument', 'Invite codes are 6 letters or numbers');
+  }
+
+  await assertJoinAllowed(uid);
+
+  const match = await db
+    .collection('families')
+    .where('inviteCode', '==', code)
+    .limit(1)
+    .get();
+
+  if (match.empty) {
+    await recordJoinFailure(uid);
+    throw new HttpsError('not-found', 'Invalid invite code. Please check and try again.');
+  }
+
+  const familyDoc = match.docs[0];
+  const familyId = familyDoc.id;
+  const expiresAt = familyDoc.get('inviteCodeExpiresAt')?.toDate?.();
+  if (!expiresAt || expiresAt.getTime() < Date.now()) {
+    throw new HttpsError(
+      'failed-precondition',
+      'This invite code has expired. Ask a nest member to share a new one.'
+    );
+  }
+
+  const memberRef = familyDoc.ref.collection('members').doc(uid);
+  const userRef = db.collection('users').doc(uid);
+  const profile = await resolveProfile(uid, request.auth.token);
+
+  await db.runTransaction(async (tx) => {
+    const existing = await tx.get(memberRef);
+    // Re-joining must not downgrade an admin or reset their join date.
+    if (!existing.exists) {
+      const family = await tx.get(familyDoc.ref);
+      if ((family.get('memberIds') || []).length >= MAX_FAMILY_MEMBERS) {
+        throw new HttpsError(
+          'failed-precondition',
+          `This nest is full (${MAX_FAMILY_MEMBERS} members).`
+        );
+      }
+      tx.set(memberRef, {
+        userId: uid,
+        displayName: profile.displayName,
+        photoUrl: profile.photoUrl,
+        role: 'member',
+        joinedAt: FieldValue.serverTimestamp(),
+        locationSharingEnabled: true,
+      });
+      tx.update(familyDoc.ref, { memberIds: FieldValue.arrayUnion(uid) });
+    }
+    tx.set(userRef, {
+      familyIds: FieldValue.arrayUnion(familyId),
+      currentFamilyId: familyId,
+    }, { merge: true });
+  });
+
+  await Promise.all([
+    rtdb.ref(`family_members/${familyId}/${uid}`).set(true),
+    rtdb.ref(`joinAttempts/${uid}`).remove(),
+  ]);
+
+  return { familyId, familyName: familyDoc.get('name') || 'My Family' };
+});
+
+/**
+ * Issues a fresh 24-hour invite code. Any member may invite, matching the app.
  */
 exports.generateInviteCode = onCall(async (request) => {
   if (!request.auth) {
@@ -343,39 +528,60 @@ exports.generateInviteCode = onCall(async (request) => {
   }
 
   const { familyId } = request.data || {};
-
-  if (!familyId) {
+  if (!familyId || typeof familyId !== 'string') {
     throw new HttpsError('invalid-argument', 'familyId is required');
   }
 
-  // Check if user is admin
   const memberSnap = await db
     .collection('families')
     .doc(familyId)
     .collection('members')
     .doc(request.auth.uid)
     .get();
-
-  if (!memberSnap.exists || memberSnap.data().role !== 'admin') {
-    throw new HttpsError('permission-denied', 'Only admins can generate invite codes');
+  if (!memberSnap.exists) {
+    throw new HttpsError('permission-denied', 'You are not a member of this nest');
   }
 
-  // Use the same invite code flow as the mobile app: families/{familyId}.inviteCode
-  const inviteCode = await generateUniqueFamilyInviteCode(6);
-  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
-
-  await db.collection('families').doc(familyId).update({
-    inviteCode: inviteCode,
-    inviteCodeExpiresAt: expiresAt,
-    inviteCodeGeneratedBy: request.auth.uid,
-    inviteCodeGeneratedAt: FieldValue.serverTimestamp(),
-  });
+  const fields = await newInviteCodeFields(request.auth.uid);
+  await db.collection('families').doc(familyId).update(fields);
 
   return {
-    inviteCode: inviteCode,
-    inviteLink: `https://familynest.app/invite/${inviteCode}`,
-    expiresAt: expiresAt.toISOString(),
+    inviteCode: fields.inviteCode,
+    expiresAt: fields.inviteCodeExpiresAt.toISOString(),
   };
+});
+
+/**
+ * Rebuilds the caller's `family_members` index from their real membership
+ * documents. Members who joined before the index existed get their read
+ * access back without the client being trusted to write the index itself.
+ */
+exports.syncMembershipIndex = onCall(async (request) => {
+  if (!request.auth) {
+    throw new HttpsError('unauthenticated', 'Must be logged in');
+  }
+
+  const uid = request.auth.uid;
+  const userSnap = await db.collection('users').doc(uid).get();
+  const familyIds = (userSnap.get('familyIds') || [])
+    .filter((id) => typeof id === 'string' && id)
+    .slice(0, 20);
+
+  const verified = [];
+  await Promise.all(familyIds.map(async (familyId) => {
+    const member = await db
+      .collection('families')
+      .doc(familyId)
+      .collection('members')
+      .doc(uid)
+      .get();
+    if (member.exists) {
+      verified.push(familyId);
+      await rtdb.ref(`family_members/${familyId}/${uid}`).set(true);
+    }
+  }));
+
+  return { familyIds: verified };
 });
 
 // ============== MEMBERSHIP MIRRORING & CLEANUP ==============
@@ -835,7 +1041,11 @@ async function saveInAppNotifications(userIds, { type, title, body, data, priori
   await batch.commit();
 }
 
-async function pushToUsers(userIds, message) {
+/**
+ * `category` must match NotificationCategory.key in notification_service.dart.
+ * Pushes without one (SOS, tracker wake-ups) ignore the user's mute settings.
+ */
+async function pushToUsers(userIds, message, { category } = {}) {
   if (userIds.length === 0) return;
 
   const userSnaps = await Promise.all(
@@ -845,6 +1055,7 @@ async function pushToUsers(userIds, message) {
   const tokenEntries = userSnaps
     .map((userSnap, index) => {
       const data = userSnap.data() || {};
+      if (category && data.notificationPrefs?.[category] === false) return null;
       const token = data.deviceInfo?.fcmToken || data.fcmToken;
       return token ? { userId: userIds[index], token } : null;
     })
@@ -973,6 +1184,6 @@ async function sendGeofenceNotification(familyId, userId, userName, geofence, ev
         geofenceName,
       },
       android: { notification: { channelId: 'geofence_alerts' } },
-    }),
+    }, { category: 'places' }),
   ]);
 }

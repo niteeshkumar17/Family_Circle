@@ -22,20 +22,33 @@ service cloud.firestore {
     
     // Check if user is an admin of the family
     function isFamilyAdmin(familyId) {
-      let member = get(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid));
-      return member != null && member.data.role == 'admin';
+      return isAuthenticated() && (
+        get(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)).data.role == 'admin' ||
+        get(/databases/$(database)/documents/families/$(familyId)).data.createdBy == request.auth.uid
+      );
     }
-    
-    // Get user's family IDs
-    function getUserFamilyIds() {
-      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.familyIds;
+
+    // True when the requester has a membership document in one of the
+    // families listed on another user's profile. `familyIds` is written by
+    // its owner, so it is only trusted as a list of candidates; membership
+    // documents can only be created by Cloud Functions. Rules cannot loop, so
+    // the first few nests are checked, which covers every realistic user.
+    function sharesFamilyWithProfile(profile) {
+      let fids = profile.get('familyIds', []);
+      return (fids.size() > 0 && isFamilyMember(fids[0])) ||
+        (fids.size() > 1 && isFamilyMember(fids[1])) ||
+        (fids.size() > 2 && isFamilyMember(fids[2])) ||
+        (fids.size() > 3 && isFamilyMember(fids[3])) ||
+        (fids.size() > 4 && isFamilyMember(fids[4]));
     }
-    
-    // Check if user shares a family with another user
-    function sharesFamilyWith(otherUserId) {
-      let userFamilies = getUserFamilyIds();
-      let otherFamilies = get(/databases/$(database)/documents/users/$(otherUserId)).data.familyIds;
-      return userFamilies.hasAny(otherFamilies);
+
+    // A member leaving may take only themselves off `memberIds`.
+    function isRemovingOnlySelf() {
+      let before = resource.data.get('memberIds', []);
+      let after = request.resource.data.get('memberIds', []);
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberIds']) &&
+        before.removeAll(after).hasOnly([request.auth.uid]) &&
+        after.removeAll(before).size() == 0;
     }
     
     // ============== APP CONFIG ==================
@@ -49,9 +62,11 @@ service cloud.firestore {
     // ============== USERS COLLECTION ==============
     
     match /users/{userId} {
-      // Users can read their own profile
-      // Any authenticated user can read basic profile (for family member display)
-      allow read: if isAuthenticated();
+      // Profiles hold phone numbers, so only the owner and people who share a
+      // nest with them may read one.
+      allow read: if isAuthenticated() && (
+        isOwner(userId) || sharesFamilyWithProfile(resource.data)
+      );
       
       // Only the owner can create their profile
       allow create: if isOwner(userId);
@@ -71,15 +86,17 @@ service cloud.firestore {
     // ============== FAMILIES COLLECTION ==============
     
     match /families/{familyId} {
-      // Allow read for authenticated users who are members OR querying by invite code
-      allow read: if isAuthenticated();
+      // Invite-code lookups run in the joinFamily Cloud Function, so nobody
+      // outside the nest needs to read it.
+      allow read: if isFamilyMember(familyId);
       
-      // Any authenticated user can create a family
-      allow create: if isAuthenticated() && 
-        request.resource.data.createdBy == request.auth.uid;
+      // Created by the createFamily Cloud Function together with the
+      // creator's admin membership.
+      allow create: if false;
       
-      // Only admins can update family info
-      allow update: if isFamilyMember(familyId);
+      // Admins edit the nest; a member leaving may remove only themselves.
+      // Invite codes are rotated by the generateInviteCode Cloud Function.
+      allow update: if isFamilyAdmin(familyId) || (isAuthenticated() && isRemovingOnlySelf());
       
       // Only admins can delete family (with safeguards)
       allow delete: if isFamilyAdmin(familyId);
@@ -89,13 +106,16 @@ service cloud.firestore {
         // Any family member can read the member list, or user can read their own membership status
         allow read: if isAuthenticated() && (isFamilyMember(familyId) || memberId == request.auth.uid);
         
-        // Users can add themselves as members (when joining)
-        allow create: if isAuthenticated() && memberId == request.auth.uid;
+        // A membership document is what grants access to a nest's locations,
+        // so only the createFamily / joinFamily Cloud Functions create them.
+        allow create: if false;
         
-        // Members can update their own data, admins can update anyone
-        allow update: if isAuthenticated() && (
-          memberId == request.auth.uid || 
-          isFamilyAdmin(familyId)
+        // Admins can update anyone; members can edit their own details but
+        // not promote themselves.
+        allow update: if isFamilyAdmin(familyId) || (
+          isAuthenticated() &&
+          memberId == request.auth.uid &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'userId'])
         );
         
         // Admins can remove members, members can remove themselves
@@ -122,8 +142,8 @@ service cloud.firestore {
     // ============== INVITES COLLECTION ==============
     
     match /invites/{inviteCode} {
-      // Anyone authenticated can read invites (to join)
-      allow read: if isAuthenticated();
+      // Unused by the app; joining goes through the joinFamily function.
+      allow read: if isFamilyMember(resource.data.familyId);
       
       // Only family admins can create invites
       allow create: if isAuthenticated() && 
@@ -177,11 +197,7 @@ service cloud.firestore {
     // for exports written by the owning device.
     
     match /location_history/{userId}/{date}/{docId} {
-      // Only the owner and family admins can read location history
-      allow read: if isOwner(userId) || (
-        isAuthenticated() && 
-        sharesFamilyWith(userId)
-      );
+      allow read: if isOwner(userId);
       
       // Only the owner can write their location history
       allow write: if isOwner(userId);

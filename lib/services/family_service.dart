@@ -1,7 +1,7 @@
 import 'dart:async';
-import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 import '../data/models/location_model.dart';
@@ -21,8 +21,10 @@ class FamilyService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final FirebaseDatabase _database = FirebaseDatabase.instance;
   final FirebaseAuth _auth = FirebaseAuth.instance;
+  final FirebaseFunctions _functions = FirebaseFunctions.instance;
 
   String? _currentFamilyId;
+  bool _membershipIndexSynced = false;
   StreamSubscription? _familySubscription;
   StreamSubscription? _sosSubscription;
   StreamSubscription? _membersFeedSubscription;
@@ -79,68 +81,53 @@ class FamilyService {
     });
   }
 
+  /// Membership changes run as Cloud Functions: the security rules no longer
+  /// let a client add itself to a nest, because that is exactly what an
+  /// attacker would do to read a stranger's live location.
+  Future<Map<String, dynamic>> _callMembershipFunction(
+    String name,
+    Map<String, dynamic> data,
+  ) async {
+    try {
+      final result = await _functions.httpsCallable(name).call(data);
+      return Map<String, dynamic>.from(result.data as Map);
+    } on FirebaseFunctionsException catch (e) {
+      throw Exception(_friendlyFunctionError(e));
+    }
+  }
+
+  String _friendlyFunctionError(FirebaseFunctionsException e) {
+    switch (e.code) {
+      case 'not-found':
+      case 'failed-precondition':
+      case 'invalid-argument':
+      case 'resource-exhausted':
+      case 'permission-denied':
+        return e.message ?? 'Request was rejected';
+      case 'unavailable':
+      case 'deadline-exceeded':
+        return 'No connection to the server. Check your internet and try again.';
+      default:
+        return 'Something went wrong. Please try again.';
+    }
+  }
+
   /// Create a new family
   Future<String> createFamily(String familyName) async {
     final user = _auth.currentUser;
     if (user == null) throw Exception('User not authenticated');
 
-    final now = DateTime.now();
-    String inviteCode;
-    try {
-      inviteCode = await _generateUniqueInviteCode();
-    } catch (_) {
-      throw Exception('Unable to create family right now. Please try again.');
-    }
+    final result = await _callMembershipFunction(
+      'createFamily',
+      {'name': familyName.trim()},
+    );
+    final familyId = result['familyId'] as String;
 
-    // Fetch user profile from Firestore to get their real name (from 'name' or 'displayName')
-    String resolvedName = 'User';
-    String? resolvedPhotoUrl;
-    try {
-      final userDoc = await _firestore.collection('users').doc(user.uid).get();
-      if (userDoc.exists) {
-        resolvedName = userDoc.data()?['displayName'] ?? userDoc.data()?['name'] ?? user.displayName ?? 'User';
-        resolvedPhotoUrl = userDoc.data()?['photoUrl'] ?? user.photoURL;
-      } else {
-        resolvedName = user.displayName ?? 'User';
-        resolvedPhotoUrl = user.photoURL;
-      }
-    } catch (e) {
-      resolvedName = user.displayName ?? 'User';
-      resolvedPhotoUrl = user.photoURL;
-    }
-
-    // Create family document
-    final familyRef = await _firestore.collection('families').add({
-      'name': familyName,
-      'createdBy': user.uid,
-      'createdByName': resolvedName,
-      'createdAt': FieldValue.serverTimestamp(),
-      'inviteCode': inviteCode,
-      'inviteCodeExpiresAt': Timestamp.fromDate(now.add(const Duration(hours: 24))),
-      'memberIds': [user.uid],
-    });
-
-    // Add current user as admin member
-    await familyRef.collection('members').doc(user.uid).set({
-      'userId': user.uid,
-      'displayName': resolvedName,
-      'photoUrl': resolvedPhotoUrl,
-      'role': 'admin',
-      'joinedAt': FieldValue.serverTimestamp(),
-      'locationSharingEnabled': true,
-    });
-
-    // Update user document
-    await _firestore.collection('users').doc(user.uid).update({
-      'familyIds': FieldValue.arrayUnion([familyRef.id]),
-      'currentFamilyId': familyRef.id,
-    });
-
-    _currentFamilyId = familyRef.id;
+    _currentFamilyId = familyId;
     _startListeningToFamily();
-    await _syncTrackingServices(familyRef.id);
+    await _syncTrackingServices(familyId);
 
-    return familyRef.id;
+    return familyId;
   }
 
   /// Get all families the user belongs to
@@ -156,7 +143,15 @@ class FamilyService {
 
     final families = <FamilyInfo>[];
     for (final id in familyIds) {
-      final doc = await _firestore.collection('families').doc(id).get();
+      // A nest the user was removed from is no longer readable; skip it
+      // rather than failing the whole list.
+      final DocumentSnapshot<Map<String, dynamic>> doc;
+      try {
+        doc = await _firestore.collection('families').doc(id).get();
+      } on FirebaseException catch (e) {
+        if (e.code == 'permission-denied') continue;
+        rethrow;
+      }
       if (doc.exists) {
         final data = doc.data()!;
         families.add(FamilyInfo(
@@ -197,7 +192,7 @@ class FamilyService {
       debugPrint('Failed to read family list: $e');
     }
 
-    await _publishMembershipIndex(user.uid, effectiveIds);
+    _ensureMembershipIndex();
 
     try {
       await BackgroundLocationService().configureForUser(
@@ -219,24 +214,24 @@ class FamilyService {
     }
   }
 
-  /// Mirror membership into Realtime Database.
+  /// Ask the server to rebuild `family_members/{familyId}/{uid}`.
   ///
   /// The database rules scope reads of `locations`, `locationHistory` and
-  /// `sos_active` to `family_members/{familyId}/{uid}`, and RTDB rules cannot
-  /// query Firestore. A Cloud Function maintains this index for new members;
-  /// writing it here as well keeps members who joined before that function
-  /// existed from losing access.
-  Future<void> _publishMembershipIndex(
-    String userId,
-    List<String> familyIds,
-  ) async {
-    for (final id in familyIds) {
+  /// `sos_active` to that index, and clients may no longer write it
+  /// themselves. Creating or joining a nest already writes it server-side;
+  /// this backfills members who joined before that was the case. Once per
+  /// session is enough, and nothing waits on it.
+  void _ensureMembershipIndex() {
+    if (_membershipIndexSynced) return;
+    _membershipIndexSynced = true;
+    unawaited(() async {
       try {
-        await _database.ref('family_members/$id/$userId').set(true);
+        await _functions.httpsCallable('syncMembershipIndex').call();
       } catch (e) {
-        debugPrint('Failed to index membership for $id: $e');
+        _membershipIndexSynced = false;
+        debugPrint('Failed to sync membership index: $e');
       }
-    }
+    }());
   }
 
   /// Switch the active family
@@ -253,75 +248,24 @@ class FamilyService {
     await _syncTrackingServices(familyId);
   }
 
-  /// Join a family with invite code
+  /// Join a family with invite code.
+  ///
+  /// Returns false when no nest has that code; throws with a readable message
+  /// for an expired code, too many wrong guesses, or no connection.
   Future<bool> joinFamily(String inviteCode) async {
     final user = _auth.currentUser;
     if (user == null) throw Exception('User not authenticated');
 
-    // Find family with invite code
-    final familyQuery = await _firestore
-        .collection('families')
-        .where('inviteCode', isEqualTo: inviteCode.toUpperCase())
-        .limit(1)
-        .get();
-
-    if (familyQuery.docs.isEmpty) {
-      return false;
-    }
-
-    final familyDoc = familyQuery.docs.first;
-    final familyData = familyDoc.data();
-    final familyId = familyDoc.id;
-    
-    // Check if invite code is expired
-    final expiresAt = familyData['inviteCodeExpiresAt'] as Timestamp?;
-    if (expiresAt != null && expiresAt.toDate().isBefore(DateTime.now())) {
-      throw Exception('Invite code has expired. Ask the family admin to generate a new code.');
-    }
-
-    // Fetch user profile from Firestore to get their real name (from 'name' or 'displayName')
-    String resolvedName = 'User';
-    String? resolvedPhotoUrl;
+    final String familyId;
     try {
-      final userDoc = await _firestore.collection('users').doc(user.uid).get();
-      if (userDoc.exists) {
-        resolvedName = userDoc.data()?['displayName'] ?? userDoc.data()?['name'] ?? user.displayName ?? 'User';
-        resolvedPhotoUrl = userDoc.data()?['photoUrl'] ?? user.photoURL;
-      } else {
-        resolvedName = user.displayName ?? 'User';
-        resolvedPhotoUrl = user.photoURL;
-      }
-    } catch (e) {
-      resolvedName = user.displayName ?? 'User';
-      resolvedPhotoUrl = user.photoURL;
+      final result = await _functions
+          .httpsCallable('joinFamily')
+          .call({'inviteCode': inviteCode.trim().toUpperCase()});
+      familyId = (result.data as Map)['familyId'] as String;
+    } on FirebaseFunctionsException catch (e) {
+      if (e.code == 'not-found') return false;
+      throw Exception(_friendlyFunctionError(e));
     }
-
-    // Avoid downgrading roles or resetting metadata if the user already joined.
-    final existingMember =
-        await familyDoc.reference.collection('members').doc(user.uid).get();
-
-    if (!existingMember.exists) {
-      // Add user to family
-      await familyDoc.reference.collection('members').doc(user.uid).set({
-        'userId': user.uid,
-        'displayName': resolvedName,
-        'photoUrl': resolvedPhotoUrl,
-        'role': 'member',
-        'joinedAt': FieldValue.serverTimestamp(),
-        'locationSharingEnabled': true,
-      });
-
-      // Update family memberIds
-      await familyDoc.reference.update({
-        'memberIds': FieldValue.arrayUnion([user.uid]),
-      });
-    }
-
-    // Update user document
-    await _firestore.collection('users').doc(user.uid).update({
-      'familyIds': FieldValue.arrayUnion([familyId]),
-      'currentFamilyId': familyId,
-    });
 
     _currentFamilyId = familyId;
     _startListeningToFamily();
@@ -330,41 +274,12 @@ class FamilyService {
     return true;
   }
 
-  /// Generate a random invite code
-  String _generateInviteCode() {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    final random = Random.secure();
-    return List.generate(6, (_) => chars[random.nextInt(chars.length)]).join();
-  }
-
-  /// Generate an invite code that does not already exist.
-  Future<String> _generateUniqueInviteCode() async {
-    const maxAttempts = 5;
-
-    for (int attempt = 0; attempt < maxAttempts; attempt++) {
-      final code = _generateInviteCode();
-      final existing = await _firestore
-          .collection('families')
-          .where('inviteCode', isEqualTo: code)
-          .limit(1)
-          .get();
-
-      if (existing.docs.isEmpty) {
-        return code;
-      }
-    }
-
-    throw Exception('Failed to generate a unique invite code. Please try again.');
-  }
-
   /// Start listening to family members
   void _startListeningToFamily() {
     final familyId = _currentFamilyId;
     if (familyId == null) return;
 
-    _familySubscription?.cancel();
-    _sosSubscription?.cancel();
-    _membersFeedSubscription?.cancel();
+    _stopListeningToFamily();
     _isFirstFamilyLoad = true;
 
     // Roster changes drive join/removal notifications only; the member data
@@ -444,6 +359,18 @@ class FamilyService {
         });
   }
 
+  /// The members feed holds Realtime Database listeners that start failing
+  /// with permission errors once the user is no longer in the nest, so it has
+  /// to go with the others.
+  void _stopListeningToFamily() {
+    _familySubscription?.cancel();
+    _sosSubscription?.cancel();
+    _membersFeedSubscription?.cancel();
+    _familySubscription = null;
+    _sosSubscription = null;
+    _membersFeedSubscription = null;
+  }
+
   /// Handles when current user is removed from the family
   Future<void> _handleSelfRemovedFromFamily() async {
     final user = _auth.currentUser;
@@ -458,8 +385,7 @@ class FamilyService {
       await _database.ref('locations/$familyId/${user.uid}').remove();
     } catch (_) {}
 
-    _familySubscription?.cancel();
-    _sosSubscription?.cancel();
+    _stopListeningToFamily();
     _currentFamilyId = null;
   }
 
@@ -621,6 +547,39 @@ class FamilyService {
     }
   }
 
+  /// The last breadcrumb recorded on the day before [date], so a timeline can
+  /// show "at Home since 11:04 PM" instead of starting at the first move.
+  Future<Map<String, dynamic>?> getLastHistoryPointBefore(
+      String memberId, DateTime date) async {
+    if (_currentFamilyId == null) return null;
+    final previous = DateTime(date.year, date.month, date.day - 1);
+    final dateKey = '${previous.year}-'
+        '${previous.month.toString().padLeft(2, '0')}-'
+        '${previous.day.toString().padLeft(2, '0')}';
+    try {
+      // Keys are 13-digit millisecond timestamps, so key order is time order.
+      final snapshot = await _database
+          .ref('locationHistory/$_currentFamilyId/$memberId/$dateKey')
+          .orderByKey()
+          .limitToLast(1)
+          .get();
+      final value = snapshot.value;
+      if (value is! Map || value.isEmpty) return null;
+      final entry = value.entries.first;
+      final point = entry.value as Map<dynamic, dynamic>;
+      return {
+        'latitude': point['latitude'],
+        'longitude': point['longitude'],
+        'accuracy': point['accuracy'],
+        'address': point['address'],
+        'timestamp': point['timestamp'] ?? int.parse(entry.key.toString()),
+      };
+    } catch (e) {
+      debugPrint('Error fetching previous history point: $e');
+      return null;
+    }
+  }
+
   /// Update current user's location
   Future<void> updateMyLocation(LocationModel location) async {
     final userId = currentUserId;
@@ -685,16 +644,14 @@ class FamilyService {
   /// Regenerate invite code (generates new code valid for 24 hours)
   Future<String> regenerateInviteCode() async {
     if (_currentFamilyId == null) throw Exception('No family selected');
-    
-    final newCode = await _generateUniqueInviteCode();
-    final expiresAt = DateTime.now().add(const Duration(hours: 24));
-    
-    await _firestore.collection('families').doc(_currentFamilyId).update({
-      'inviteCode': newCode,
-      'inviteCodeExpiresAt': Timestamp.fromDate(expiresAt),
-    });
-    
-    return newCode;
+
+    // Checking a new code is unique needs a query across every nest, which
+    // clients are not allowed to read, so the server issues it.
+    final result = await _callMembershipFunction(
+      'generateInviteCode',
+      {'familyId': _currentFamilyId},
+    );
+    return result['inviteCode'] as String;
   }
 
   /// Update family name
@@ -754,8 +711,7 @@ class FamilyService {
       debugPrint('Best-effort cleanup after leaving $familyId failed: $e');
     }
 
-    _familySubscription?.cancel();
-    _sosSubscription?.cancel();
+    _stopListeningToFamily();
     _currentFamilyId = nextFamilyId;
 
     // Leaving the last nest has to stop the tracker, otherwise it keeps
@@ -858,9 +814,7 @@ class FamilyService {
       });
     } catch (_) {}
 
-    // Stop listening and clear current family
-    _familySubscription?.cancel();
-    _sosSubscription?.cancel();
+    _stopListeningToFamily();
     _currentFamilyId = null;
   }
   
@@ -1000,6 +954,7 @@ class FamilyService {
 
     _currentFamilyId = null;
     _isFirstFamilyLoad = true;
+    _membershipIndexSynced = false;
   }
 
   /// Dispose

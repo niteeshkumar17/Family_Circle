@@ -6,9 +6,40 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../data/models/notification_model.dart';
 import '../firebase_options.dart';
 import 'tracker_watchdog.dart';
+
+/// Alert categories the user can mute. SOS is deliberately not one of them.
+///
+/// The [key] is stored under `users/{uid}.notificationPrefs` and read by the
+/// Cloud Functions, so changing a key requires changing `index.js` too.
+enum NotificationCategory {
+  places('places'),
+  battery('battery'),
+  nest('nest');
+
+  const NotificationCategory(this.key);
+  final String key;
+
+  static NotificationCategory? forType(String? type) {
+    switch (type) {
+      case 'geofenceEntry':
+      case 'geofenceExit':
+      case 'geofenceDwell':
+        return NotificationCategory.places;
+      case 'lowBattery':
+      case 'phoneOff':
+        return NotificationCategory.battery;
+      case 'familyJoin':
+      case 'familyLeave':
+        return NotificationCategory.nest;
+      default:
+        return null;
+    }
+  }
+}
 
 /// Notification Service
 /// 
@@ -30,9 +61,44 @@ class NotificationService {
   /// Get FCM token
   String? get fcmToken => _fcmToken;
 
+  static const _prefPrefix = 'notif_enabled_';
+  final Map<NotificationCategory, bool> _enabled = {
+    for (final c in NotificationCategory.values) c: true,
+  };
+
+  bool isCategoryEnabled(NotificationCategory category) =>
+      _enabled[category] ?? true;
+
+  /// Loads the device's cached preferences. The profile copy is what the
+  /// server honours; this one decides whether local pop-ups are shown.
+  Future<Map<NotificationCategory, bool>> loadCategoryPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    for (final c in NotificationCategory.values) {
+      _enabled[c] = prefs.getBool('$_prefPrefix${c.key}') ?? true;
+    }
+    return Map.of(_enabled);
+  }
+
+  Future<void> setCategoryEnabled(
+    NotificationCategory category,
+    bool enabled,
+  ) async {
+    _enabled[category] = enabled;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('$_prefPrefix${category.key}', enabled);
+
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+      'notificationPrefs': {category.key: enabled},
+    }, SetOptions(merge: true));
+  }
+
   /// Initialize notification service
   Future<void> initialize() async {
     if (_isInitialized) return;
+
+    await loadCategoryPrefs();
 
     // Request permission
     await _requestPermission();
@@ -261,6 +327,8 @@ class NotificationService {
 
     // Determine notification type and channel
     final type = data['type'] ?? 'general';
+    final category = NotificationCategory.forType(type);
+    if (category != null && !isCategoryEnabled(category)) return;
     String channelId = 'general';
     Importance importance = Importance.defaultImportance;
 
@@ -385,12 +453,14 @@ class NotificationService {
     required bool isEntry,
   }) async {
     final action = isEntry ? 'arrived at' : 'left';
-    await _showLocalNotification(
-      title: isEntry ? '📍 Arrival' : '🚶 Departure',
-      body: '$userName $action $placeName',
-      channelId: 'geofence_alerts',
-      importance: Importance.high,
-    );
+    if (isCategoryEnabled(NotificationCategory.places)) {
+      await _showLocalNotification(
+        title: isEntry ? '📍 Arrival' : '🚶 Departure',
+        body: '$userName $action $placeName',
+        channelId: 'geofence_alerts',
+        importance: Importance.high,
+      );
+    }
     
     await _saveNotificationToFirestore(
       NotificationModel(
@@ -410,11 +480,13 @@ class NotificationService {
     required String userName,
     required String familyName,
   }) async {
-    await _showLocalNotification(
-      title: '👋 New Member',
-      body: '$userName joined $familyName',
-      channelId: 'family_updates',
-    );
+    if (isCategoryEnabled(NotificationCategory.nest)) {
+      await _showLocalNotification(
+        title: '👋 New Member',
+        body: '$userName joined $familyName',
+        channelId: 'family_updates',
+      );
+    }
 
     await _saveNotificationToFirestore(
       NotificationModel(
@@ -458,11 +530,13 @@ class NotificationService {
     required String userName,
     required int batteryLevel,
   }) async {
-    await _showLocalNotification(
-      title: '🔋 Low Battery Alert',
-      body: '$userName\'s phone is at $batteryLevel%',
-      channelId: 'system_alerts',
-    );
+    if (isCategoryEnabled(NotificationCategory.battery)) {
+      await _showLocalNotification(
+        title: '🔋 Low Battery Alert',
+        body: '$userName\'s phone is at $batteryLevel%',
+        channelId: 'system_alerts',
+      );
+    }
 
     await _saveNotificationToFirestore(
       NotificationModel(

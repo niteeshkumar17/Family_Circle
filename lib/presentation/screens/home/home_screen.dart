@@ -1,7 +1,7 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -250,12 +250,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return IndexedStack(
       key: _nestKey,
       index: _currentIndex,
-      children: const [
-        MapViewContent(),
-        RealFamilyScreen(),
-        SizedBox(), // SOS placeholder
-        PlacesContent(),
-        SettingsContent(),
+      children: [
+        MapViewContent(onSwitchNest: () => _showSwitchNestsSheet(context)),
+        const RealFamilyScreen(),
+        const SizedBox(), // SOS placeholder
+        const PlacesContent(),
+        const SettingsContent(),
       ],
     );
   }
@@ -460,16 +460,65 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 },
               ),
             ),
+            SafeArea(
+              top: false,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: _nestActionButton(
+                        label: 'Add a nest',
+                        onPressed: () {
+                          Navigator.pop(context);
+                          Navigator.pushNamed(this.context, AppRoutes.createFamily);
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: _nestActionButton(
+                        label: 'Join a nest',
+                        onPressed: () {
+                          Navigator.pop(context);
+                          Navigator.pushNamed(this.context, AppRoutes.joinFamily);
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _nestActionButton({
+    required String label,
+    required VoidCallback onPressed,
+  }) {
+    return OutlinedButton(
+      onPressed: onPressed,
+      style: OutlinedButton.styleFrom(
+        foregroundColor: AppTheme.primaryColor,
+        side: const BorderSide(color: AppTheme.primaryColor),
+        minimumSize: const Size.fromHeight(48),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+        ),
+      ),
+      child: Text(label),
     );
   }
 }
 
 // Map View Content
 class MapViewContent extends StatefulWidget {
-  const MapViewContent({super.key});
+  const MapViewContent({super.key, this.onSwitchNest});
+
+  final VoidCallback? onSwitchNest;
 
   @override
   State<MapViewContent> createState() => _MapViewContentState();
@@ -511,11 +560,20 @@ class _MapViewContentState extends State<MapViewContent> {
   void _watchMyLocation() {
     _myLocationSubscription = _locationService.locationStream.listen((location) {
       if (!mounted) return;
-      setState(() {
-        _currentPosition = LatLng(location.latitude, location.longitude);
-        _isLoading = false;
-      });
-      _rebuildMarkers();
+      final next = LatLng(location.latitude, location.longitude);
+      // GPS jitter of a few metres is invisible at street zoom; skip the
+      // rebuild rather than redrawing the map for it.
+      final moved = Geolocator.distanceBetween(
+            _currentPosition.latitude,
+            _currentPosition.longitude,
+            next.latitude,
+            next.longitude,
+          ) >=
+          5;
+      if (!moved && !_isLoading) return;
+      _currentPosition = next;
+      _isLoading = false;
+      _rebuildMarkers(force: true);
     });
   }
 
@@ -532,7 +590,7 @@ class _MapViewContentState extends State<MapViewContent> {
     _membersSubscription =
         _familyService.getFamilyMembersStream(familyId).listen((members) {
       if (!mounted) return;
-      setState(() => _familyMembers = members);
+      _familyMembers = members;
       _rebuildMarkers();
     });
   }
@@ -550,18 +608,20 @@ class _MapViewContentState extends State<MapViewContent> {
       ).timeout(const Duration(seconds: 15));
 
       if (!mounted) return;
-      setState(() {
-        _currentPosition = LatLng(position.latitude, position.longitude);
-        _isLoading = false;
-      });
-      _rebuildMarkers();
+      _currentPosition = LatLng(position.latitude, position.longitude);
+      _isLoading = false;
+      _rebuildMarkers(force: true);
     } catch (e) {
       debugPrint('Error getting location: $e');
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  void _rebuildMarkers() {
+  /// Rebuilds the marker set, skipping the frame when nothing visible
+  /// changed. The members feed fires for every presence and battery write,
+  /// most of which do not move a marker. [force] is for state outside the
+  /// markers (the loading spinner) that still needs a rebuild.
+  void _rebuildMarkers({bool force = false}) {
     if (!mounted) return;
 
     final markers = <Marker>{
@@ -596,6 +656,8 @@ class _MapViewContentState extends State<MapViewContent> {
       );
     }
 
+    if (!force && setEquals(markers, _markers)) return;
+
     setState(() {
       _markers
         ..clear()
@@ -610,6 +672,14 @@ class _MapViewContentState extends State<MapViewContent> {
 
   void _fitAllMarkers() {
     if (_markers.isEmpty || _mapController == null) return;
+
+    // Bounds around a single point would zoom all the way in.
+    if (_markers.length == 1) {
+      _mapController!.animateCamera(
+        CameraUpdate.newLatLngZoom(_markers.first.position, 15),
+      );
+      return;
+    }
 
     // Calculate bounds that include all markers
     double minLat = _markers.first.position.latitude;
@@ -641,131 +711,6 @@ class _MapViewContentState extends State<MapViewContent> {
     );
   }
 
-  void _showFamilySelectorSheet(BuildContext context) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (context) => Container(
-        padding: const EdgeInsets.all(24),
-        decoration: const BoxDecoration(
-          color: Color(0xFF1A1A1A),
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Handle bar
-            Container(
-              width: 40,
-              height: 4,
-              margin: const EdgeInsets.only(bottom: 20),
-              decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.3),
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-            
-            // Title
-            const Text(
-              'Select nest',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 18,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            
-            const SizedBox(height: 24),
-            
-            // Family list
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.05),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      "$_selectedFamilyName's nest",
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 16,
-                      ),
-                    ),
-                  ),
-                  const Icon(
-                    Icons.check_circle,
-                    color: AppTheme.primaryColor,
-                    size: 24,
-                  ),
-                  const SizedBox(width: 12),
-                  GestureDetector(
-                    onTap: () {
-                      Navigator.pop(context);
-                      Navigator.pushNamed(context, AppRoutes.manageNest);
-                    },
-                    child: Icon(
-                      Icons.settings_outlined,
-                      color: Colors.white.withOpacity(0.6),
-                      size: 24,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            
-            const SizedBox(height: 24),
-            
-            // Action buttons
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton(
-                    onPressed: () {
-                      Navigator.pop(context);
-                      Navigator.pushNamed(context, AppRoutes.createFamily);
-                    },
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: AppTheme.primaryColor,
-                      side: const BorderSide(color: AppTheme.primaryColor),
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                    child: const Text('Add a nest'),
-                  ),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: OutlinedButton(
-                    onPressed: () {
-                      Navigator.pop(context);
-                      Navigator.pushNamed(context, AppRoutes.joinFamily);
-                    },
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: AppTheme.primaryColor,
-                      side: const BorderSide(color: AppTheme.primaryColor),
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                    child: const Text('Join a nest'),
-                  ),
-                ),
-              ],
-            ),
-            
-            const SizedBox(height: 16),
-          ],
-        ),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Stack(
@@ -778,8 +723,10 @@ class _MapViewContentState extends State<MapViewContent> {
           ),
           onMapCreated: (controller) {
             _mapController = controller;
-            // Delay slightly to ensure markers are added, then fit all
+            // Give the first member snapshot a moment to arrive before fitting.
             Future.delayed(const Duration(milliseconds: 500), () {
+              if (!mounted || _hasFittedCamera) return;
+              if (_markers.length > 1) _hasFittedCamera = true;
               _fitAllMarkers();
             });
           },
@@ -823,7 +770,7 @@ class _MapViewContentState extends State<MapViewContent> {
                     // Family name with dropdown
                     Expanded(
                       child: GestureDetector(
-                        onTap: () => _showFamilySelectorSheet(context),
+                        onTap: widget.onSwitchNest,
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
@@ -1090,253 +1037,6 @@ class _MapViewContentState extends State<MapViewContent> {
   }
 }
 
-// Family List Content
-class FamilyListContent extends StatefulWidget {
-  const FamilyListContent({super.key});
-
-  @override
-  State<FamilyListContent> createState() => _FamilyListContentState();
-}
-
-class _FamilyListContentState extends State<FamilyListContent> {
-  final FamilyService _familyService = FamilyService();
-  StreamSubscription<List<FamilyMemberData>>? _membersSubscription;
-  List<FamilyMemberData> _members = [];
-  bool _isLoading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadMembers();
-  }
-
-  @override
-  void dispose() {
-    _membersSubscription?.cancel();
-    super.dispose();
-  }
-
-  Future<void> _loadMembers() async {
-    final familyId = await _familyService.getCurrentUserFamilyId();
-    if (!mounted) return;
-
-    if (familyId == null) {
-      setState(() => _isLoading = false);
-      return;
-    }
-
-    await _membersSubscription?.cancel();
-    _membersSubscription =
-        _familyService.getFamilyMembersStream(familyId).listen((members) {
-      if (!mounted) return;
-      setState(() {
-        _members = members;
-        _isLoading = false;
-      });
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  'Family Members',
-                  style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                IconButton(
-                  onPressed: () {},
-                  icon: const Icon(Icons.person_add_rounded),
-                ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: _isLoading
-                ? const Center(child: CircularProgressIndicator())
-                : _members.isEmpty
-                    ? Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.family_restroom, size: 64, color: Colors.grey[400]),
-                            const SizedBox(height: 16),
-                            Text(
-                              'No family members yet',
-                              style: TextStyle(color: Colors.grey[600], fontSize: 16),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              'Create or join a family to see members here',
-                              style: TextStyle(color: Colors.grey[500], fontSize: 14),
-                            ),
-                          ],
-                        ),
-                      )
-                    : ListView.builder(
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        itemCount: _members.length,
-                        itemBuilder: (context, index) {
-                          return _buildMemberListItem(context, index);
-                        },
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildMemberListItem(BuildContext context, int index) {
-    final member = _members[index];
-    
-    return GestureDetector(
-      onTap: () {
-        Navigator.pushNamed(
-          context,
-          AppRoutes.memberDetail,
-          arguments: {
-            'memberId': member.id,
-            'memberName': member.name,
-            'status': member.isOnline ? 'Online' : 'Offline',
-            'battery': member.batteryLevel,
-            'lat': member.latitude ?? 0.0,
-            'lng': member.longitude ?? 0.0,
-          },
-        );
-      },
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 12),
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(16),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.05),
-              blurRadius: 10,
-              offset: const Offset(0, 2),
-            ),
-          ],
-        ),
-        child: Row(
-          children: [
-            Stack(
-              children: [
-                CircleAvatar(
-                  radius: 28,
-                  backgroundColor: AppTheme.primaryColor.withOpacity(0.1),
-                  child: Text(
-                    member.name[0],
-                    style: const TextStyle(
-                      color: AppTheme.primaryColor,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 20,
-                    ),
-                  ),
-                ),
-                Positioned(
-                  right: 0,
-                  bottom: 0,
-                  child: Container(
-                    width: 14,
-                    height: 14,
-                    decoration: BoxDecoration(
-                      color: member.isOnline ? AppTheme.successColor : Colors.grey,
-                      shape: BoxShape.circle,
-                      border: Border.all(color: Colors.white, width: 2),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    member.name,
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Icon(
-                        member.isOnline ? Icons.location_on : Icons.location_off,
-                        size: 14,
-                        color: member.isOnline ? AppTheme.successColor : AppTheme.textSecondary,
-                      ),
-                      const SizedBox(width: 4),
-                      Expanded(
-                        child: Text(
-                          member.statusText,
-                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: AppTheme.textSecondary,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Row(
-                  children: [
-                    Icon(
-                      Icons.battery_std,
-                      size: 16,
-                      color: member.batteryLevel < 50 
-                          ? AppTheme.warningColor 
-                          : AppTheme.successColor,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      '${member.batteryLevel}%',
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  member.lastSeenText,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: AppTheme.textHint,
-                    fontSize: 11,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(width: 8),
-            IconButton(
-              onPressed: () {
-                // Navigate to directions
-              },
-              icon: const Icon(
-                Icons.directions_rounded,
-                color: AppTheme.primaryColor,
-              ),
-            ),
-          ],
-        ),
-      ),
-    ).animate().fadeIn(delay: Duration(milliseconds: 100 * index));
-  }
-}
-
 // Places Content
 class PlacesContent extends StatefulWidget {
   const PlacesContent({super.key});
@@ -1397,7 +1097,9 @@ class _PlacesContentState extends State<PlacesContent> {
                       }
                       
                       if (snapshot.hasError) {
-                        return Center(child: Text('Error: ${snapshot.error}'));
+                        return const Center(
+                          child: Text("Couldn't load places. Check your connection."),
+                        );
                       }
                       
                       final geofences = snapshot.data ?? [];
@@ -1513,8 +1215,20 @@ class _PlacesContentState extends State<PlacesContent> {
             Switch(
               value: geofence.isActive,
               onChanged: (value) async {
-                final updated = geofence.copyWith(isActive: value);
-                await FamilyService().updateGeofence(updated);
+                final messenger = ScaffoldMessenger.of(context);
+                try {
+                  await FamilyService()
+                      .updateGeofence(geofence.copyWith(isActive: value));
+                } catch (e) {
+                  final denied = e is FirebaseException &&
+                      e.code == 'permission-denied';
+                  messenger.showSnackBar(SnackBar(
+                    content: Text(denied
+                        ? 'Only a nest admin can turn place alerts on or off'
+                        : 'Could not update ${geofence.name}. Try again.'),
+                    backgroundColor: AppTheme.errorColor,
+                  ));
+                }
               },
               activeColor: AppTheme.primaryColor,
             ),
@@ -1575,7 +1289,7 @@ class _PlacesContentState extends State<PlacesContent> {
                     ),
                   ),
                   const Text(
-                    'Not Setup • Tap to add',
+                    'Not set up yet',
                     style: TextStyle(
                       color: Colors.grey,
                       fontSize: 12,
@@ -1584,9 +1298,13 @@ class _PlacesContentState extends State<PlacesContent> {
                 ],
               ),
             ),
-            const Switch(
-              value: false,
-              onChanged: null, // Disabled switch
+            TextButton(
+              onPressed: () => Navigator.pushNamed(
+                context,
+                AppRoutes.createGeofence,
+                arguments: {'initialName': name},
+              ),
+              child: const Text('Set up'),
             ),
           ],
         ),
@@ -1606,13 +1324,16 @@ class SettingsContent extends StatefulWidget {
 }
 
 class _SettingsContentState extends State<SettingsContent> {
-  bool _notificationsEnabled = true;
+  Map<NotificationCategory, bool> _notificationPrefs = {
+    for (final c in NotificationCategory.values) c: true,
+  };
   bool _locationSharingEnabled = true;
   bool _backgroundSetupNeeded = false;
 
   @override
   void initState() {
     super.initState();
+    _loadNotificationPrefs();
     _loadLocationSharingPreference();
     _loadBackgroundHealth();
   }
@@ -1821,6 +1542,38 @@ class _SettingsContentState extends State<SettingsContent> {
     );
   }
 
+  static const _categoryLabels = {
+    NotificationCategory.places: ('Place alerts', 'Arrivals and departures'),
+    NotificationCategory.battery: ('Low battery', "A member's phone is running low"),
+    NotificationCategory.nest: ('Nest activity', 'Someone joins your nest'),
+  };
+
+  bool get _anyNotificationsEnabled =>
+      _notificationPrefs.values.any((enabled) => enabled);
+
+  Future<void> _loadNotificationPrefs() async {
+    final prefs = await NotificationService().loadCategoryPrefs();
+    if (mounted) setState(() => _notificationPrefs = prefs);
+  }
+
+  Future<void> _setNotificationCategory(
+    NotificationCategory category,
+    bool enabled,
+  ) async {
+    setState(() => _notificationPrefs = {..._notificationPrefs, category: enabled});
+    try {
+      await NotificationService().setCategoryEnabled(category, enabled);
+    } catch (e) {
+      debugPrint('Failed to save notification preference: $e');
+    }
+  }
+
+  Future<void> _setAllNotificationCategories(bool enabled) async {
+    for (final category in NotificationCategory.values) {
+      await _setNotificationCategory(category, enabled);
+    }
+  }
+
   void _showNotificationsDialog() {
     showDialog(
       context: context,
@@ -1830,38 +1583,25 @@ class _SettingsContentState extends State<SettingsContent> {
           builder: (context, setDialogState) => Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              SwitchListTile(
-                title: const Text('All Notifications'),
-                subtitle: const Text('Enable or disable all notifications'),
-                value: _notificationsEnabled,
-                onChanged: (value) {
-                  setDialogState(() => _notificationsEnabled = value);
-                  setState(() {});
-                },
-                activeColor: AppTheme.primaryColor,
-              ),
-              const Divider(),
               const ListTile(
-                title: Text('SOS Alerts'),
-                subtitle: Text('Always enabled for safety'),
+                contentPadding: EdgeInsets.zero,
+                title: Text('SOS alerts'),
+                subtitle: Text('Always on for safety'),
                 trailing: Icon(Icons.check_circle, color: AppTheme.successColor),
               ),
-              ListTile(
-                title: const Text('Location Updates'),
-                trailing: Switch(
-                  value: _notificationsEnabled,
-                  onChanged: null,
+              const Divider(),
+              for (final category in NotificationCategory.values)
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(_categoryLabels[category]!.$1),
+                  subtitle: Text(_categoryLabels[category]!.$2),
+                  value: _notificationPrefs[category] ?? true,
+                  onChanged: (value) async {
+                    await _setNotificationCategory(category, value);
+                    setDialogState(() {});
+                  },
                   activeColor: AppTheme.primaryColor,
                 ),
-              ),
-              ListTile(
-                title: const Text('Geofence Alerts'),
-                trailing: Switch(
-                  value: _notificationsEnabled,
-                  onChanged: null,
-                  activeColor: AppTheme.primaryColor,
-                ),
-              ),
             ],
           ),
         ),
@@ -2394,7 +2134,11 @@ class _SettingsContentState extends State<SettingsContent> {
           _buildSettingsSection(context, 'Account', [
             _buildSettingsTile(context, 'Profile', Icons.person_outline_rounded, _showProfileDialog),
             _buildSettingsTile(context, 'Notifications', Icons.notifications_outlined, _showNotificationsDialog, 
-                trailing: Switch(value: _notificationsEnabled, onChanged: (v) => setState(() => _notificationsEnabled = v), activeColor: AppTheme.primaryColor)),
+                trailing: Switch(
+                  value: _anyNotificationsEnabled,
+                  onChanged: _setAllNotificationCategories,
+                  activeColor: AppTheme.primaryColor,
+                )),
             _buildSettingsTile(context, 'Location Sharing', Icons.location_on_outlined, _showLocationSharingDialog,
                 trailing: Switch(
                   value: _locationSharingEnabled,

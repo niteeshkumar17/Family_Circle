@@ -81,6 +81,7 @@ dependencies:
   google_generative_ai: ^0.4.7
   geolocator: 13.0.4
   workmanager: ^0.7.0
+  cloud_functions: 4.7.6
 
 dev_dependencies:
   flutter_test:

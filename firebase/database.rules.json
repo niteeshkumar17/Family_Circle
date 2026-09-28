@@ -7,7 +7,7 @@
       "$familyId": {
         ".read": "auth != null && data.child(auth.uid).exists()",
         "$userId": {
-          ".write": "auth != null && auth.uid == $userId",
+          ".write": "auth != null && auth.uid == $userId && !newData.exists()",
           ".validate": "newData.isBoolean()"
         }
       }
@@ -68,6 +68,11 @@
     },
 
     "wakeAttempts": {
+      ".read": false,
+      ".write": false
+    },
+
+    "joinAttempts": {
       ".read": false,
       ".write": false
     }

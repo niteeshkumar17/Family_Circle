@@ -10,7 +10,6 @@ import '../presentation/screens/family/join_family_screen.dart';
 import '../presentation/screens/home/home_screen.dart';
 import '../presentation/screens/sos/sos_screen.dart';
 import '../presentation/screens/family/manage_nest_screen.dart';
-// Placeholder imports
 import '../presentation/screens/placeholder_screens.dart';
 import '../presentation/screens/family/manage_members_screen.dart';
 import '../presentation/screens/legal/privacy_policy_screen.dart';
@@ -28,16 +27,11 @@ class AppRoutes {
   static const String createFamily = '/create-family';
   static const String joinFamily = '/join-family';
   static const String home = '/home';
-  static const String map = '/map';
-  static const String family = '/family';
   static const String memberDetail = '/member-detail';
-  static const String history = '/history';
-  static const String geofence = '/geofence';
   static const String createGeofence = '/create-geofence';
   static const String sos = '/sos';
   static const String manageNest = '/manage-nest';
   static const String manageMembers = '/manage-members';
-  static const String settings = '/settings';
   static const String privacy = '/privacy';
   static const String terms = '/terms';
   static const String helpSupport = '/help-support';
@@ -63,10 +57,6 @@ class AppRoutes {
         return _buildRoute(const JoinFamilyScreen());
       case home:
         return _buildRoute(const HomeScreen());
-      case map:
-        return _buildRoute(const MapScreen());
-      case family:
-        return _buildRoute(const FamilyScreen());
       case memberDetail:
         final args = settings.arguments as Map<String, dynamic>;
         return _buildRoute(MemberDetailScreen(
@@ -77,11 +67,6 @@ class AppRoutes {
           lat: args['lat'],
           lng: args['lng'],
         ));
-      case history:
-        final args = settings.arguments as Map<String, dynamic>?;
-        return _buildRoute(HistoryScreen(userId: args?['userId']));
-      case geofence:
-        return _buildRoute(const GeofenceScreen());
       case createGeofence:
         final args = settings.arguments as Map<String, dynamic>?;
         return _buildRoute(CreateGeofenceScreen(
@@ -95,8 +80,6 @@ class AppRoutes {
       case manageMembers:
         final args = settings.arguments as Map<String, dynamic>;
         return _buildRoute(ManageMembersScreen(familyId: args['familyId']));
-      case AppRoutes.settings:
-        return _buildRoute(const SettingsScreen());
       case privacy:
         return _buildRoute(const PrivacyPolicyScreen());
       case terms:
