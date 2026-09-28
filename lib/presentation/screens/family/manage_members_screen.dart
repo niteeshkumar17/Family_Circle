@@ -14,6 +14,15 @@ class ManageMembersScreen extends StatefulWidget {
 class _ManageMembersScreenState extends State<ManageMembersScreen> {
   final FamilyService _familyService = FamilyService();
   bool _isLoading = false;
+  bool _canRemove = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _familyService.isCurrentUserAdmin(widget.familyId).then((isAdmin) {
+      if (mounted) setState(() => _canRemove = isAdmin);
+    }).catchError((_) {});
+  }
 
   void _confirmRemoveMember(String memberId, String memberName) {
     showDialog(
@@ -159,7 +168,7 @@ class _ManageMembersScreenState extends State<ManageMembersScreen> {
                               color: isAdmin ? AppTheme.primaryColor : Colors.white54,
                             ),
                           ),
-                          trailing: (isAdmin || isSelf) 
+                          trailing: (isAdmin || isSelf || !_canRemove)
                               ? null 
                               : IconButton(
                                   icon: const Icon(Icons.remove_circle_outline, color: AppTheme.errorColor),

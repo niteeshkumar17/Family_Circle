@@ -9,8 +9,15 @@ import 'package:share_plus/share_plus.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:permission_handler/permission_handler.dart' as handler;
+import 'package:flutter_polyline_points/flutter_polyline_points.dart';
+import 'package:url_launcher/url_launcher.dart';
+import '../../../config/app_config.dart';
 import '../../../config/theme_config.dart';
 import '../../../config/routes.dart';
+import '../../../services/account_service.dart';
+import '../../../services/map_focus.dart';
+import '../history/member_history_screen.dart';
+import 'member_focus_card.dart';
 import '../../../services/background_service.dart';
 import '../../../services/device_optimization_service.dart';
 import '../../../services/family_service.dart';
@@ -34,12 +41,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   int _currentIndex = 0;
   bool _isBackgroundLocationRestricted = false;
   Key _nestKey = UniqueKey();
+  StreamSubscription<String>? _mapFocusSub;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _checkPermissions();
+    _mapFocusSub = MapFocus.requests.listen((_) {
+      if (mounted && _currentIndex != 0) setState(() => _currentIndex = 0);
+    });
     
     // Check for OTA updates after frame renders
     WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -61,6 +72,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _mapFocusSub?.cancel();
     super.dispose();
   }
 
@@ -251,7 +263,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       key: _nestKey,
       index: _currentIndex,
       children: [
-        MapViewContent(onSwitchNest: () => _showSwitchNestsSheet(context)),
+        MapViewContent(
+          onSwitchNest: () => _showSwitchNestsSheet(context),
+          isVisible: _currentIndex == 0,
+        ),
         const RealFamilyScreen(),
         const SizedBox(), // SOS placeholder
         const PlacesContent(),
@@ -516,9 +531,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
 // Map View Content
 class MapViewContent extends StatefulWidget {
-  const MapViewContent({super.key, this.onSwitchNest});
+  const MapViewContent({super.key, this.onSwitchNest, this.isVisible = true});
 
   final VoidCallback? onSwitchNest;
+
+  /// Whether the Map tab is on screen; back only closes the member card then.
+  final bool isVisible;
 
   @override
   State<MapViewContent> createState() => _MapViewContentState();
@@ -541,9 +559,22 @@ class _MapViewContentState extends State<MapViewContent> {
   /// yank the map back while the user is panning or zooming.
   bool _hasFittedCamera = false;
 
+  StreamSubscription<String>? _focusSubscription;
+  String? _focusedId;
+
+  /// Set when a member was opened before the map or their location was ready.
+  bool _pendingFocusCamera = false;
+
+  Set<Polyline> _routePolylines = {};
+  bool _loadingRoute = false;
+  String? _routeSummary;
+
+  static const double _focusCardSpace = 280;
+
   @override
   void initState() {
     super.initState();
+    _focusSubscription = MapFocus.requests.listen(_focusMember);
     _getCurrentLocation();
     _watchMyLocation();
     _loadFamilyMembers();
@@ -551,10 +582,216 @@ class _MapViewContentState extends State<MapViewContent> {
 
   @override
   void dispose() {
+    _focusSubscription?.cancel();
     _membersSubscription?.cancel();
     _myLocationSubscription?.cancel();
     _mapController?.dispose();
     super.dispose();
+  }
+
+  FamilyMemberData? get _focusedMember {
+    for (final m in _familyMembers) {
+      if (m.id == _focusedId) return m;
+    }
+    return null;
+  }
+
+  void _focusMember(String memberId) {
+    if (!mounted) return;
+    if (_focusedId != memberId) _resetRoute();
+    // An explicit focus wins over the one-off "fit everyone" on start-up.
+    _hasFittedCamera = true;
+    setState(() => _focusedId = memberId);
+    _rebuildMarkers();
+    _moveCameraToFocused();
+  }
+
+  void _moveCameraToFocused() {
+    final member = _focusedMember;
+    if (_mapController == null || member?.latitude == null) {
+      _pendingFocusCamera = true;
+      return;
+    }
+    _pendingFocusCamera = false;
+    _mapController!.animateCamera(
+      CameraUpdate.newLatLngZoom(LatLng(member!.latitude!, member.longitude!), 16),
+    );
+  }
+
+  void _clearFocus() {
+    if (_focusedId == null) return;
+    _pendingFocusCamera = false;
+    _resetRoute();
+    setState(() => _focusedId = null);
+    _rebuildMarkers();
+  }
+
+  void _resetRoute() {
+    _routePolylines = {};
+    _routeSummary = null;
+    _loadingRoute = false;
+  }
+
+  Future<void> _toggleRoute() async {
+    final member = _focusedMember;
+    if (member?.latitude == null) return;
+
+    if (_routePolylines.isNotEmpty) {
+      setState(_resetRoute);
+      _moveCameraToFocused();
+      return;
+    }
+
+    final memberId = member!.id;
+    final origin = _currentPosition;
+    final destination = LatLng(member.latitude!, member.longitude!);
+    setState(() => _loadingRoute = true);
+
+    List<LatLng> points;
+    String summary;
+    bool roadRoute = true;
+    try {
+      final result = await PolylinePoints().getRouteBetweenCoordinates(
+        googleApiKey: AppConfig.googleMapsApiKey,
+        request: PolylineRequest(
+          origin: PointLatLng(origin.latitude, origin.longitude),
+          destination: PointLatLng(destination.latitude, destination.longitude),
+          mode: TravelMode.driving,
+        ),
+      );
+      if (result.points.isEmpty) {
+        throw Exception(result.errorMessage ?? 'No route found');
+      }
+      points = result.points.map((p) => LatLng(p.latitude, p.longitude)).toList();
+      final metres = result.totalDistanceValue ??
+          _pathLengthMetres(points).round();
+      final seconds = result.totalDurationValue ?? (metres / 30000 * 3600).round();
+      summary = '${_formatDistance(metres)} • ${_formatDuration(seconds)} by car';
+    } catch (e) {
+      debugPrint('Route preview failed, drawing a straight line: $e');
+      roadRoute = false;
+      points = [origin, destination];
+      final metres = _pathLengthMetres(points).round();
+      summary = '${_formatDistance(metres)} away in a straight line';
+    }
+
+    if (!mounted || _focusedId != memberId) return;
+    setState(() {
+      _loadingRoute = false;
+      _routeSummary = summary;
+      _routePolylines = {
+        Polyline(
+          polylineId: const PolylineId('route'),
+          points: points,
+          color: roadRoute ? AppTheme.primaryColor : Colors.grey,
+          width: roadRoute ? 5 : 3,
+          jointType: JointType.round,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          patterns: roadRoute
+              ? const []
+              : [PatternItem.dash(12), PatternItem.gap(10)],
+        ),
+      };
+    });
+    _mapController?.animateCamera(
+      CameraUpdate.newLatLngBounds(_boundsOf(points), 60),
+    );
+  }
+
+  static double _pathLengthMetres(List<LatLng> points) {
+    var total = 0.0;
+    for (var i = 1; i < points.length; i++) {
+      total += Geolocator.distanceBetween(
+        points[i - 1].latitude,
+        points[i - 1].longitude,
+        points[i].latitude,
+        points[i].longitude,
+      );
+    }
+    return total;
+  }
+
+  static String _formatDistance(int metres) => metres < 1000
+      ? '$metres m'
+      : '${(metres / 1000).toStringAsFixed(metres < 10000 ? 1 : 0)} km';
+
+  static String _formatDuration(int seconds) {
+    final minutes = (seconds / 60).round();
+    if (minutes < 1) return '< 1 min';
+    if (minutes < 60) return '$minutes min';
+    return '${minutes ~/ 60}h ${minutes % 60}m';
+  }
+
+  static LatLngBounds _boundsOf(List<LatLng> points) {
+    var minLat = points.first.latitude, maxLat = minLat;
+    var minLng = points.first.longitude, maxLng = minLng;
+    for (final p in points) {
+      if (p.latitude < minLat) minLat = p.latitude;
+      if (p.latitude > maxLat) maxLat = p.latitude;
+      if (p.longitude < minLng) minLng = p.longitude;
+      if (p.longitude > maxLng) maxLng = p.longitude;
+    }
+    return LatLngBounds(
+      southwest: LatLng(minLat, minLng),
+      northeast: LatLng(maxLat, maxLng),
+    );
+  }
+
+  /// `launchUrl` reports "cannot launch" by returning false as often as it
+  /// does by throwing, so both outcomes surface the same message.
+  Future<void> _launch(Uri uri, String failureMessage,
+      {LaunchMode mode = LaunchMode.platformDefault}) async {
+    final messenger = ScaffoldMessenger.of(context);
+    var launched = false;
+    try {
+      launched = await launchUrl(uri, mode: mode);
+    } catch (e) {
+      debugPrint('Failed to launch $uri: $e');
+    }
+    if (!launched) {
+      messenger.showSnackBar(SnackBar(content: Text(failureMessage)));
+    }
+  }
+
+  void _contact(FamilyMemberData member, String scheme, String failureMessage) {
+    final phone = member.phone;
+    if (phone == null || phone.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Phone number not available')),
+      );
+      return;
+    }
+    _launch(Uri(scheme: scheme, path: phone), failureMessage);
+  }
+
+  Widget _buildFocusCard(FamilyMemberData member) {
+    return MemberFocusCard(
+      key: ValueKey(member.id),
+      member: member,
+      showingRoute: _routePolylines.isNotEmpty,
+      loadingRoute: _loadingRoute,
+      routeSummary: _routeSummary,
+      onClose: _clearFocus,
+      onCall: () => _contact(member, 'tel', 'Could not start the call'),
+      onMessage: () => _contact(member, 'sms', 'Could not open messages'),
+      onHistory: () => Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => MemberHistoryScreen(
+            memberId: member.id,
+            memberName: member.displayName,
+          ),
+        ),
+      ),
+      onToggleRoute: _toggleRoute,
+      onNavigate: () => _launch(
+        Uri.parse('https://www.google.com/maps/dir/?api=1'
+            '&destination=${member.latitude},${member.longitude}'),
+        'Could not open Google Maps',
+        mode: LaunchMode.externalApplication,
+      ),
+    );
   }
 
   void _watchMyLocation() {
@@ -592,6 +829,10 @@ class _MapViewContentState extends State<MapViewContent> {
       if (!mounted) return;
       _familyMembers = members;
       _rebuildMarkers();
+      // The card reads live member data (battery, address) even when no
+      // marker moved.
+      if (_focusedId != null) setState(() {});
+      if (_pendingFocusCamera) _moveCameraToFocused();
     });
   }
 
@@ -637,20 +878,20 @@ class _MapViewContentState extends State<MapViewContent> {
       if (member.isCurrentUser) continue;
       if (member.latitude == null || member.longitude == null) continue;
 
+      final focused = member.id == _focusedId;
       markers.add(
         Marker(
           markerId: MarkerId(member.id),
           position: LatLng(member.latitude!, member.longitude!),
-          infoWindow: InfoWindow(
-            title: member.name,
-            snippet: member.isOnline
-                ? (member.location?.address ?? 'Online')
-                : 'Last seen: ${member.lastSeenText}',
-          ),
+          consumeTapEvents: true,
+          onTap: () => _focusMember(member.id),
+          zIndex: focused ? 2 : 1,
           icon: BitmapDescriptor.defaultMarkerWithHue(
-            member.isOnline
-                ? BitmapDescriptor.hueGreen
-                : BitmapDescriptor.hueOrange,
+            focused
+                ? BitmapDescriptor.hueViolet
+                : member.isOnline
+                    ? BitmapDescriptor.hueGreen
+                    : BitmapDescriptor.hueOrange,
           ),
         ),
       );
@@ -713,7 +954,13 @@ class _MapViewContentState extends State<MapViewContent> {
 
   @override
   Widget build(BuildContext context) {
-    return Stack(
+    final focusedMember = _focusedMember;
+    return PopScope(
+      canPop: !(widget.isVisible && _focusedId != null),
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _clearFocus();
+      },
+      child: Stack(
       children: [
         // Google Map
         GoogleMap(
@@ -723,6 +970,10 @@ class _MapViewContentState extends State<MapViewContent> {
           ),
           onMapCreated: (controller) {
             _mapController = controller;
+            if (_pendingFocusCamera) {
+              _moveCameraToFocused();
+              return;
+            }
             // Give the first member snapshot a moment to arrive before fitting.
             Future.delayed(const Duration(milliseconds: 500), () {
               if (!mounted || _hasFittedCamera) return;
@@ -730,9 +981,14 @@ class _MapViewContentState extends State<MapViewContent> {
               _fitAllMarkers();
             });
           },
+          onTap: (_) => _clearFocus(),
+          padding: EdgeInsets.only(
+            bottom: focusedMember != null ? _focusCardSpace : 0,
+          ),
           myLocationEnabled: true,
           myLocationButtonEnabled: false,
           markers: _markers,
+          polylines: _routePolylines,
           zoomControlsEnabled: false,
           mapToolbarEnabled: false,
         ),
@@ -742,6 +998,25 @@ class _MapViewContentState extends State<MapViewContent> {
           const Center(
             child: CircularProgressIndicator(),
           ),
+
+        // Clear of the SOS button, which is docked over the bottom bar and
+        // reaches about 28dp into the map.
+        Positioned(
+          left: 12,
+          right: 12,
+          bottom: 40,
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 220),
+            transitionBuilder: (child, animation) => SlideTransition(
+              position: Tween(begin: const Offset(0, 0.25), end: Offset.zero)
+                  .animate(animation),
+              child: FadeTransition(opacity: animation, child: child),
+            ),
+            child: focusedMember != null
+                ? _buildFocusCard(focusedMember)
+                : const SizedBox.shrink(),
+          ),
+        ),
         
         // Dark Header Bar (Life360 style)
         Positioned(
@@ -813,6 +1088,7 @@ class _MapViewContentState extends State<MapViewContent> {
           ),
         ),
       ],
+      ),
     );
   }
 
@@ -1672,220 +1948,6 @@ class _SettingsContentState extends State<SettingsContent> {
     );
   }
 
-  void _showManageFamilyDialog() {
-    showDialog(
-      context: context,
-      builder: (context) => Dialog(
-        backgroundColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: AppTheme.primaryColor.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Icon(Icons.family_restroom_rounded, color: AppTheme.primaryColor, size: 24),
-                  ),
-                  const SizedBox(width: 12),
-                  const Text(
-                    'Manage Family',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                      color: AppTheme.textPrimary,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 20),
-              FutureBuilder<String?>(
-                future: FamilyService().getCurrentUserFamilyId(),
-                builder: (context, snapshot) {
-                  if (!snapshot.hasData || snapshot.data == null) {
-                    return Column(
-                      children: [
-                        Icon(Icons.group_off, size: 48, color: Colors.grey[400]),
-                        const SizedBox(height: 8),
-                        Text(
-                          'No family yet',
-                          style: TextStyle(color: Colors.grey[600]),
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          'Go to Family tab to create or join one',
-                          style: TextStyle(color: Colors.grey[500], fontSize: 12),
-                        ),
-                      ],
-                    );
-                  }
-                  return StreamBuilder<List<FamilyMemberData>>(
-                    stream: FamilyService().getFamilyMembersStream(snapshot.data!),
-                    builder: (context, membersSnapshot) {
-                      if (!membersSnapshot.hasData || membersSnapshot.data!.isEmpty) {
-                        return const Text('Loading members...');
-                      }
-                      return Column(
-                        children: membersSnapshot.data!.map((member) {
-                          return Column(
-                            children: [
-                              _buildFamilyMemberTile(
-                                member.name,
-                                member.isOnline ? 'Online' : 'Offline',
-                                member.name[0],
-                                isAdmin: false,
-                              ),
-                              Divider(color: Colors.grey.shade200, height: 1),
-                            ],
-                          );
-                        }).toList(),
-                      );
-                    },
-                  );
-                },
-              ),
-              const SizedBox(height: 20),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: () => Navigator.pop(context),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppTheme.primaryColor,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    elevation: 0,
-                  ),
-                  child: const Text('Done', style: TextStyle(fontWeight: FontWeight.w600)),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildFamilyMemberTile(String name, String role, String initial, {bool isAdmin = false}) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 12),
-      child: Row(
-        children: [
-          Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [AppTheme.primaryColor, AppTheme.primaryLight],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: Center(
-              child: Text(
-                initial,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 18,
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  name,
-                  style: const TextStyle(
-                    color: AppTheme.textPrimary,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 16,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Row(
-                  children: [
-                    if (isAdmin) ...[
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: AppTheme.primaryColor.withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: const Text(
-                          'Admin',
-                          style: TextStyle(
-                            color: AppTheme.primaryColor,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ),
-                    ] else
-                      Text(
-                        role,
-                        style: const TextStyle(
-                          color: AppTheme.textSecondary,
-                          fontSize: 13,
-                        ),
-                      ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          if (isAdmin)
-            const Icon(Icons.shield_rounded, color: AppTheme.primaryColor, size: 22)
-          else
-            PopupMenuButton(
-              icon: const Icon(Icons.more_vert, color: AppTheme.textSecondary),
-              color: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              elevation: 8,
-              itemBuilder: (context) => [
-                const PopupMenuItem(
-                  value: 'admin',
-                  child: Row(
-                    children: [
-                      Icon(Icons.shield_outlined, size: 20, color: AppTheme.primaryColor),
-                      SizedBox(width: 10),
-                      Text('Make Admin', style: TextStyle(color: AppTheme.textPrimary)),
-                    ],
-                  ),
-                ),
-                const PopupMenuItem(
-                  value: 'remove',
-                  child: Row(
-                    children: [
-                      Icon(Icons.person_remove_outlined, size: 20, color: AppTheme.errorColor),
-                      SizedBox(width: 10),
-                      Text('Remove', style: TextStyle(color: AppTheme.errorColor)),
-                    ],
-                  ),
-                ),
-              ],
-              onSelected: (value) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Action: $value')),
-                );
-              },
-            ),
-        ],
-      ),
-    );
-  }
-
   void _showInviteDialog() async {
     // Show loading dialog first
     showDialog(
@@ -2118,6 +2180,78 @@ class _SettingsContentState extends State<SettingsContent> {
     );
   }
 
+  Future<void> _showDeleteAccountDialog() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete Account?'),
+        content: const Text(
+          'Your account will be deactivated right away and removed from your nests\' maps.\n\n'
+          'You can recover it by signing in again with the same Google account within '
+          '${AccountService.recoveryDays} days. After that, your profile, location history '
+          'and nest memberships are permanently deleted, along with any nest where you are '
+          'the only member.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: AppTheme.errorColor),
+            child: const Text('Delete', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+
+    final DateTime deleteOn;
+    try {
+      deleteOn = await AccountService().requestDeletion();
+    } catch (e) {
+      if (!mounted) return;
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+      );
+      return;
+    }
+    if (!mounted) return;
+    Navigator.pop(context);
+
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('Account Deleted'),
+        content: Text(
+          'Your account is scheduled for permanent deletion on '
+          '${AccountService.formatDate(deleteOn)}.\n\n'
+          'Changed your mind? Sign in with the same Google account before then to '
+          'recover everything. After that date all your data will be permanently deleted.',
+        ),
+        actions: [
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+
+    context.read<AuthBloc>().add(AuthLogoutRequested());
+    Navigator.pushNamedAndRemoveUntil(context, AppRoutes.login, (route) => false);
+  }
+
   @override
   Widget build(BuildContext context) {
     return SafeArea(
@@ -2164,7 +2298,8 @@ class _SettingsContentState extends State<SettingsContent> {
           ]),
           const SizedBox(height: 16),
           _buildSettingsSection(context, 'Family', [
-            _buildSettingsTile(context, 'Manage Family', Icons.family_restroom_outlined, _showManageFamilyDialog),
+            _buildSettingsTile(context, 'Manage Nest', Icons.family_restroom_outlined,
+                () => Navigator.pushNamed(context, AppRoutes.manageNest)),
             _buildSettingsTile(context, 'Invite Members', Icons.person_add_outlined, _showInviteDialog),
             _buildSettingsTile(context, 'Join a Nest', Icons.group_add_outlined, () => Navigator.pushNamed(context, AppRoutes.joinFamily)),
           ]),
@@ -2183,6 +2318,11 @@ class _SettingsContentState extends State<SettingsContent> {
               leading: const Icon(Icons.logout_rounded, color: AppTheme.errorColor),
               title: const Text('Sign Out', style: TextStyle(color: AppTheme.errorColor, fontWeight: FontWeight.w500)),
               onTap: _showSignOutDialog,
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_forever_rounded, color: AppTheme.errorColor),
+              title: const Text('Delete Account', style: TextStyle(color: AppTheme.errorColor, fontWeight: FontWeight.w500)),
+              onTap: _showDeleteAccountDialog,
             ),
           ]),
           const SizedBox(height: 24),

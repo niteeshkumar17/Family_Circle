@@ -1,3 +1,6 @@
+import 'dart:math' as math;
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:intl/intl.dart';
@@ -26,6 +29,15 @@ class MemberHistoryScreen extends StatefulWidget {
 class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
   static const _daysShown = 30;
   static const _fallbackCamera = LatLng(28.6139, 77.2090);
+  static const _defaultStayColor = Color(0xFF8B5CF6);
+
+  static const double _sheetMin = 0.2;
+  static const double _sheetInitial = 0.45;
+  static const double _sheetMax = 0.92;
+
+  /// Past this the sheet covers most of the map, so the map stops shrinking
+  /// its visible area to match.
+  static const double _sheetMaxMapPadding = 0.6;
 
   DateTime _selectedDate = DateUtils.dateOnly(DateTime.now());
   GoogleMapController? _mapController;
@@ -35,11 +47,27 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
   Set<Polyline> _polylines = {};
   int? _selectedEntry;
 
+  /// Stay number shown on the map and in the list, keyed by entry index.
+  Map<int, int> _stayNumbers = {};
+  Map<int, BitmapDescriptor> _stayIcons = {};
+  static final Map<String, BitmapDescriptor> _iconCache = {};
+  List<GlobalKey> _entryKeys = [];
+
   List<KnownPlace>? _places;
   final Map<String, GeofenceModel> _geofencesById = {};
 
   bool _isLoading = false;
   String? _error;
+
+  /// The map is built straight away so its native start-up overlaps the
+  /// history fetch, but stays covered until it shows the member's day rather
+  /// than a default city.
+  bool _mapRevealed = false;
+
+  final DraggableScrollableController _sheetController =
+      DraggableScrollableController();
+  final ValueNotifier<double> _sheetExtent = ValueNotifier(_sheetInitial);
+  double _mapPaddingExtent = _sheetInitial;
 
   /// Tapping through days quickly must not let a slow earlier response
   /// overwrite the day that is actually selected.
@@ -56,11 +84,15 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
   @override
   void dispose() {
     _mapController?.dispose();
+    _sheetController.dispose();
+    _sheetExtent.dispose();
     super.dispose();
   }
 
   Future<void> _load(DateTime date) async {
     final token = ++_loadToken;
+    final pixelRatio =
+        ui.PlatformDispatcher.instance.implicitView?.devicePixelRatio ?? 2.5;
     setState(() {
       _selectedDate = DateUtils.dateOnly(date);
       _isLoading = true;
@@ -88,12 +120,36 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
         isToday: _isToday,
       );
 
+      final stayNumbers = <int, int>{};
+      final stayIcons = <int, BitmapDescriptor>{};
+      for (var i = 0; i < timeline.entries.length; i++) {
+        final entry = timeline.entries[i];
+        if (entry is! StayEntry) continue;
+        final number = stayNumbers.length + 1;
+        stayNumbers[i] = number;
+        try {
+          stayIcons[i] =
+              await _numberedIcon(number, _colorFor(entry), pixelRatio);
+        } catch (e) {
+          debugPrint('Could not draw stay marker: $e');
+        }
+      }
+      if (!mounted || token != _loadToken) return;
+
       setState(() {
         _timeline = timeline;
+        _stayNumbers = stayNumbers;
+        _stayIcons = stayIcons;
+        _entryKeys =
+            List.generate(timeline.entries.length, (_) => GlobalKey());
         _isLoading = false;
         _rebuildMapObjects();
       });
-      _scheduleFit();
+      if (_mapRevealed) {
+        _scheduleFit();
+      } else {
+        _revealMapWhenReady();
+      }
     } catch (e) {
       if (!mounted || token != _loadToken) return;
       setState(() {
@@ -101,6 +157,102 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
         _error = 'Could not load history. Check your connection and try again.';
       });
     }
+  }
+
+  /// Jumps (rather than animates) to the day on first show, then uncovers the
+  /// map, so the first thing the user sees is the route.
+  void _revealMapWhenReady() {
+    if (_mapRevealed || _mapController == null || _timeline == null) return;
+    // The map may not have laid out yet; bounds on a zero-sized map throw.
+    Future.delayed(const Duration(milliseconds: 250), () {
+      if (!mounted || _mapRevealed) return;
+      _fitAll(animate: false);
+      Future.delayed(const Duration(milliseconds: 150), () {
+        if (mounted) setState(() => _mapRevealed = true);
+      });
+    });
+  }
+
+  Future<BitmapDescriptor> _numberedIcon(
+      int number, Color color, double pixelRatio) async {
+    final cacheKey = '$number-${color.value}-$pixelRatio';
+    final cached = _iconCache[cacheKey];
+    if (cached != null) return cached;
+
+    const logicalSize = 30.0;
+    final size = logicalSize * pixelRatio;
+    final center = Offset(size / 2, size / 2);
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+
+    canvas.drawCircle(
+      center.translate(0, pixelRatio),
+      size / 2 - pixelRatio,
+      Paint()
+        ..color = Colors.black.withOpacity(0.25)
+        ..maskFilter = MaskFilter.blur(BlurStyle.normal, pixelRatio),
+    );
+    canvas.drawCircle(center, size / 2 - pixelRatio, Paint()..color = Colors.white);
+    canvas.drawCircle(center, size / 2 - 3.5 * pixelRatio, Paint()..color = color);
+
+    final label = TextPainter(
+      text: TextSpan(
+        text: '$number',
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: (number > 9 ? 11 : 13) * pixelRatio,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      textDirection: ui.TextDirection.ltr,
+    )..layout();
+    label.paint(canvas, center - Offset(label.width / 2, label.height / 2));
+
+    final image =
+        await recorder.endRecording().toImage(size.ceil(), size.ceil());
+    final png = await image.toByteData(format: ui.ImageByteFormat.png);
+    image.dispose();
+    final icon = BitmapDescriptor.bytes(
+      png!.buffer.asUint8List(),
+      imagePixelRatio: pixelRatio,
+    );
+    _iconCache[cacheKey] = icon;
+    return icon;
+  }
+
+  Color _colorFor(StayEntry stay) =>
+      _geofencesById[stay.place?.id]?.typeColor ?? _defaultStayColor;
+
+  void _onSheetExtent(double extent) {
+    _sheetExtent.value = extent;
+    // The map's padding goes over a platform channel, so it follows the
+    // sheet in steps rather than on every drag frame.
+    final padding = math.min(extent, _sheetMaxMapPadding);
+    if ((padding - _mapPaddingExtent).abs() > 0.02) {
+      setState(() => _mapPaddingExtent = padding);
+    }
+  }
+
+  /// Brings a timeline row into view after its marker or route was tapped.
+  void _revealEntry(int index) {
+    if (_sheetController.isAttached && _sheetController.size < _sheetInitial - 0.05) {
+      _sheetController.animateTo(
+        _sheetInitial,
+        duration: const Duration(milliseconds: 250),
+        curve: Curves.easeOutCubic,
+      );
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final rowContext =
+          index < _entryKeys.length ? _entryKeys[index].currentContext : null;
+      if (rowContext == null) return;
+      Scrollable.ensureVisible(
+        rowContext,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOutCubic,
+        alignment: 0.1,
+      );
+    });
   }
 
   Future<List<KnownPlace>> _loadPlaces() async {
@@ -151,17 +303,17 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
 
       switch (entry) {
         case StayEntry():
+          final numbered = _stayIcons[i];
           markers.add(Marker(
             markerId: MarkerId('stay_$i'),
             position: LatLng(entry.latitude, entry.longitude),
-            icon: BitmapDescriptor.defaultMarkerWithHue(_hueFor(entry)),
+            icon: numbered ??
+                BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueViolet),
+            anchor: numbered != null ? const Offset(0.5, 0.5) : const Offset(0.5, 1),
             alpha: dimmed ? 0.45 : 1,
-            zIndex: selected == i ? 2 : 1,
-            infoWindow: InfoWindow(
-              title: entry.label,
-              snippet: _stayTimeRange(entry),
-            ),
-            onTap: () => _select(i),
+            zIndex: selected == i ? 3 : 2,
+            consumeTapEvents: true,
+            onTap: () => _select(i, fromMap: true),
           ));
         case TripEntry():
           final color = AppTheme.primaryColor.withOpacity(dimmed ? 0.3 : 1);
@@ -181,7 +333,7 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
                 startCap: Cap.roundCap,
                 endCap: Cap.roundCap,
                 consumeTapEvents: true,
-                onTap: () => _select(i),
+                onTap: () => _select(i, fromMap: true),
               ));
               runIndex++;
             }
@@ -215,21 +367,6 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
     _polylines = polylines;
   }
 
-  double _hueFor(StayEntry stay) {
-    final geofence = _geofencesById[stay.place?.id];
-    if (geofence == null) return BitmapDescriptor.hueViolet;
-    switch (geofence.type) {
-      case GeofenceType.home:
-        return BitmapDescriptor.hueGreen;
-      case GeofenceType.school:
-        return BitmapDescriptor.hueAzure;
-      case GeofenceType.office:
-        return BitmapDescriptor.hueOrange;
-      case GeofenceType.custom:
-        return BitmapDescriptor.hueMagenta;
-    }
-  }
-
   void _scheduleFit() {
     // The map may not have laid out yet; bounds on a zero-sized map throw.
     Future.delayed(const Duration(milliseconds: 350), () {
@@ -237,7 +374,7 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
     });
   }
 
-  void _fitAll() {
+  void _fitAll({bool animate = true}) {
     final timeline = _timeline;
     if (timeline == null || timeline.isEmpty) return;
     final coords = <LatLng>[
@@ -248,12 +385,15 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
             entry.path.map((p) => LatLng(p.latitude, p.longitude)),
         },
     ];
-    _fitCoords(coords);
+    _fitCoords(coords, animate: animate);
   }
 
-  void _fitCoords(List<LatLng> coords) {
+  void _fitCoords(List<LatLng> coords, {bool animate = true}) {
     final controller = _mapController;
     if (controller == null || coords.isEmpty) return;
+    void move(CameraUpdate update) => animate
+        ? controller.animateCamera(update)
+        : controller.moveCamera(update);
 
     var minLat = coords.first.latitude, maxLat = minLat;
     var minLng = coords.first.longitude, maxLng = minLng;
@@ -266,11 +406,11 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
 
     // A single spot has zero-size bounds, which zooms to the maximum.
     if ((maxLat - minLat).abs() < 0.0005 && (maxLng - minLng).abs() < 0.0005) {
-      controller.animateCamera(CameraUpdate.newLatLngZoom(
+      move(CameraUpdate.newLatLngZoom(
           LatLng((minLat + maxLat) / 2, (minLng + maxLng) / 2), 16));
       return;
     }
-    controller.animateCamera(CameraUpdate.newLatLngBounds(
+    move(CameraUpdate.newLatLngBounds(
       LatLngBounds(
         southwest: LatLng(minLat, minLng),
         northeast: LatLng(maxLat, maxLng),
@@ -279,7 +419,7 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
     ));
   }
 
-  void _select(int index) {
+  void _select(int index, {bool fromMap = false}) {
     final timeline = _timeline;
     if (timeline == null) return;
     final toggledOff = _selectedEntry == index;
@@ -291,6 +431,7 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
       _fitAll();
       return;
     }
+    if (fromMap) _revealEntry(index);
     final entry = timeline.entries[index];
     switch (entry) {
       case StayEntry():
@@ -384,8 +525,36 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
       body: Column(
         children: [
           _buildDateStrip(),
-          Expanded(flex: 4, child: _buildMap()),
-          Expanded(flex: 5, child: _buildTimelinePanel()),
+          const Divider(height: 1),
+          Expanded(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final height = constraints.maxHeight;
+                return Stack(
+                  children: [
+                    Positioned.fill(child: _buildMap(height)),
+                    _buildFitButton(height),
+                    NotificationListener<DraggableScrollableNotification>(
+                      onNotification: (n) {
+                        _onSheetExtent(n.extent);
+                        return false;
+                      },
+                      child: DraggableScrollableSheet(
+                        controller: _sheetController,
+                        initialChildSize: _sheetInitial,
+                        minChildSize: _sheetMin,
+                        maxChildSize: _sheetMax,
+                        snap: true,
+                        snapSizes: const [_sheetInitial],
+                        builder: (context, scrollController) =>
+                            _buildTimelineSheet(scrollController),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
         ],
       ),
     );
@@ -450,28 +619,18 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
     );
   }
 
-  Widget _buildMap() {
-    final timeline = _timeline;
-    // Hold the map back until the first day has loaded so it opens on the
-    // member's route instead of flashing a default city first.
-    if (timeline == null) {
-      return const Center(child: CircularProgressIndicator());
-    }
-
-    final first = timeline.points.isNotEmpty ? timeline.points.first : null;
+  Widget _buildMap(double height) {
+    final coveredBottom = height * _mapPaddingExtent;
     return Stack(
       children: [
         GoogleMap(
-          initialCameraPosition: CameraPosition(
-            target: first == null
-                ? _fallbackCamera
-                : LatLng(first.latitude, first.longitude),
-            zoom: first == null ? 11 : 14,
-          ),
+          initialCameraPosition:
+              const CameraPosition(target: _fallbackCamera, zoom: 11),
           onMapCreated: (controller) {
             _mapController = controller;
-            _scheduleFit();
+            _revealMapWhenReady();
           },
+          padding: EdgeInsets.only(bottom: coveredBottom),
           markers: _markers,
           polylines: _polylines,
           zoomControlsEnabled: false,
@@ -481,59 +640,83 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
             if (_selectedEntry != null) _select(_selectedEntry!);
           },
         ),
-        if (!timeline.isEmpty)
-          Positioned(
-            right: 12,
-            bottom: 12,
-            child: FloatingActionButton.small(
-              heroTag: 'history_fit',
-              tooltip: 'Show whole day',
-              backgroundColor: Colors.white,
-              foregroundColor: AppTheme.primaryColor,
-              onPressed: () {
-                if (_selectedEntry != null) {
-                  setState(() {
-                    _selectedEntry = null;
-                    _rebuildMapObjects();
-                  });
-                }
-                _fitAll();
-              },
-              child: const Icon(Icons.zoom_out_map_rounded),
-            ),
-          ),
-        if (_isLoading)
+        if (!_mapRevealed)
+          Container(
+            color: AppTheme.backgroundColor,
+            padding: EdgeInsets.only(bottom: coveredBottom),
+            alignment: Alignment.center,
+            child: _error == null ? const CircularProgressIndicator() : null,
+          )
+        else if (_isLoading)
           Container(
             color: Colors.white.withOpacity(0.5),
-            child: const Center(child: CircularProgressIndicator()),
+            padding: EdgeInsets.only(bottom: coveredBottom),
+            alignment: Alignment.center,
+            child: const CircularProgressIndicator(),
           ),
       ],
     );
   }
 
-  Widget _buildTimelinePanel() {
-    return Container(
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-        boxShadow: [
-          BoxShadow(color: Colors.black12, blurRadius: 10, offset: Offset(0, -2)),
-        ],
+  Widget _buildFitButton(double height) {
+    final timeline = _timeline;
+    if (timeline == null || timeline.isEmpty || !_mapRevealed) {
+      return const SizedBox.shrink();
+    }
+    return ValueListenableBuilder<double>(
+      valueListenable: _sheetExtent,
+      builder: (context, extent, child) => Positioned(
+        right: 12,
+        bottom: height * extent + 12,
+        child: child!,
       ),
-      child: Column(
-        children: [
-          Container(
-            margin: const EdgeInsets.only(top: 10, bottom: 6),
-            width: 40,
-            height: 4,
-            decoration: BoxDecoration(
-              color: AppTheme.dividerColor,
-              borderRadius: BorderRadius.circular(2),
+      child: FloatingActionButton.small(
+        heroTag: 'history_fit',
+        tooltip: 'Show whole day',
+        backgroundColor: Colors.white,
+        foregroundColor: AppTheme.primaryColor,
+        onPressed: () {
+          if (_selectedEntry != null) {
+            setState(() {
+              _selectedEntry = null;
+              _rebuildMapObjects();
+            });
+          }
+          _fitAll();
+        },
+        child: const Icon(Icons.zoom_out_map_rounded),
+      ),
+    );
+  }
+
+  Widget _buildTimelineSheet(ScrollController scrollController) {
+    return Material(
+      color: Colors.white,
+      elevation: 10,
+      shadowColor: Colors.black38,
+      borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+      clipBehavior: Clip.antiAlias,
+      child: CustomScrollView(
+        controller: scrollController,
+        slivers: [
+          SliverToBoxAdapter(
+            child: Column(
+              children: [
+                Container(
+                  margin: const EdgeInsets.only(top: 10, bottom: 6),
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: AppTheme.dividerColor,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                _buildSummary(),
+                const Divider(height: 1),
+              ],
             ),
           ),
-          _buildSummary(),
-          const Divider(height: 1),
-          Expanded(child: _buildTimelineBody()),
+          _buildTimelineBody(),
         ],
       ),
     );
@@ -568,62 +751,83 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
 
   Widget _buildTimelineBody() {
     if (_error != null) {
-      return _EmptyState(
-        icon: Icons.cloud_off_rounded,
-        title: 'Something went wrong',
-        message: _error!,
-        action: TextButton(
-          onPressed: () => _load(_selectedDate),
-          child: const Text('Try again'),
+      return SliverToBoxAdapter(
+        child: _EmptyState(
+          icon: Icons.cloud_off_rounded,
+          title: 'Something went wrong',
+          message: _error!,
+          action: TextButton(
+            onPressed: () => _load(_selectedDate),
+            child: const Text('Try again'),
+          ),
         ),
       );
     }
 
     final timeline = _timeline;
-    if (timeline == null) return const SizedBox.shrink();
+    if (timeline == null) {
+      return const SliverToBoxAdapter(child: SizedBox.shrink());
+    }
 
     if (timeline.isEmpty) {
-      return _EmptyState(
-        icon: Icons.location_off_rounded,
-        title: 'No history for ${_dayLabel(_selectedDate).toLowerCase()}',
-        message: _isToday
-            ? 'Nothing has been recorded yet today. Places and trips appear '
-                'here as ${widget.memberName} moves around.'
-            : 'Location wasn\'t recorded on this day. The phone may have been '
-                'off or sharing was paused.',
+      return SliverToBoxAdapter(
+        child: _EmptyState(
+          icon: Icons.location_off_rounded,
+          title: 'No history for ${_dayLabel(_selectedDate).toLowerCase()}',
+          message: _isToday
+              ? 'Nothing has been recorded yet today. Places and trips appear '
+                  'here as ${widget.memberName} moves around.'
+              : 'Location wasn\'t recorded on this day. The phone may have been '
+                  'off or sharing was paused.',
+        ),
       );
     }
 
-    return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-      itemCount: timeline.entries.length,
-      itemBuilder: (context, index) {
-        final entry = timeline.entries[index];
-        final isFirst = index == 0;
-        final isLast = index == timeline.entries.length - 1;
-        final selected = _selectedEntry == index;
-        return switch (entry) {
-          StayEntry() => _StayTile(
-              stay: entry,
-              timeRange: _stayTimeRange(entry),
-              duration: _formatDuration(entry.duration),
-              geofence: _geofencesById[entry.place?.id],
-              selected: selected,
-              showTopRail: !isFirst,
-              showBottomRail: !isLast,
-              onTap: () => _select(index),
-            ),
-          TripEntry() => _TripTile(
-              trip: entry,
-              title: _tripTitle(entry),
-              details: _tripDetails(entry),
-              selected: selected,
-              showBottomRail: !isLast,
-              onTap: () => _select(index),
-            ),
-        };
-      },
+    // A day has at most a few dozen rows, and building them all eagerly is
+    // what lets a tapped marker scroll its row into view.
+    return SliverPadding(
+      padding: EdgeInsets.fromLTRB(
+          16, 12, 16, 24 + MediaQuery.paddingOf(context).bottom),
+      sliver: SliverToBoxAdapter(
+        child: Column(
+          children: [
+            for (var index = 0; index < timeline.entries.length; index++)
+              KeyedSubtree(
+                key: _entryKeys[index],
+                child: _buildEntry(timeline, index),
+              ),
+          ],
+        ),
+      ),
     );
+  }
+
+  Widget _buildEntry(DayTimeline timeline, int index) {
+    final entry = timeline.entries[index];
+    final isFirst = index == 0;
+    final isLast = index == timeline.entries.length - 1;
+    final selected = _selectedEntry == index;
+    return switch (entry) {
+      StayEntry() => _StayTile(
+          stay: entry,
+          number: _stayNumbers[index],
+          timeRange: _stayTimeRange(entry),
+          duration: _formatDuration(entry.duration),
+          geofence: _geofencesById[entry.place?.id],
+          selected: selected,
+          showTopRail: !isFirst,
+          showBottomRail: !isLast,
+          onTap: () => _select(index),
+        ),
+      TripEntry() => _TripTile(
+          trip: entry,
+          title: _tripTitle(entry),
+          details: _tripDetails(entry),
+          selected: selected,
+          showBottomRail: !isLast,
+          onTap: () => _select(index),
+        ),
+    };
   }
 
   String _tripTitle(TripEntry trip) {
@@ -699,6 +903,7 @@ class _SummaryStat extends StatelessWidget {
 class _StayTile extends StatelessWidget {
   const _StayTile({
     required this.stay,
+    required this.number,
     required this.timeRange,
     required this.duration,
     required this.geofence,
@@ -709,6 +914,9 @@ class _StayTile extends StatelessWidget {
   });
 
   final StayEntry stay;
+
+  /// Matches the number on this stay's map marker.
+  final int? number;
   final String timeRange;
   final String duration;
   final GeofenceModel? geofence;
@@ -745,14 +953,46 @@ class _StayTile extends StatelessWidget {
                           ? const _Rail()
                           : const SizedBox.shrink(),
                     ),
-                    Container(
+                    SizedBox(
                       width: 40,
                       height: 40,
-                      decoration: BoxDecoration(
-                        color: color.withOpacity(0.14),
-                        shape: BoxShape.circle,
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          Container(
+                            decoration: BoxDecoration(
+                              color: color.withOpacity(0.14),
+                              shape: BoxShape.circle,
+                            ),
+                            alignment: Alignment.center,
+                            child: Icon(icon, color: color, size: 22),
+                          ),
+                          if (number != null)
+                            Positioned(
+                              right: -3,
+                              top: -3,
+                              child: Container(
+                                constraints: const BoxConstraints(minWidth: 18),
+                                height: 18,
+                                padding: const EdgeInsets.symmetric(horizontal: 4),
+                                alignment: Alignment.center,
+                                decoration: BoxDecoration(
+                                  color: color,
+                                  borderRadius: BorderRadius.circular(9),
+                                  border: Border.all(color: Colors.white, width: 1.5),
+                                ),
+                                child: Text(
+                                  '$number',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
                       ),
-                      child: Icon(icon, color: color, size: 22),
                     ),
                     Expanded(
                       child: showBottomRail
@@ -974,7 +1214,7 @@ class _EmptyState extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Center(
-      child: SingleChildScrollView(
+      child: Padding(
         padding: const EdgeInsets.all(32),
         child: Column(
           mainAxisSize: MainAxisSize.min,

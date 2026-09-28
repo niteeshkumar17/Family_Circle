@@ -68,11 +68,14 @@ service cloud.firestore {
         isOwner(userId) || sharesFamilyWithProfile(resource.data)
       );
       
-      // Only the owner can create their profile
-      allow create: if isOwner(userId);
-      
-      // Only the owner can update their profile
-      allow update: if isOwner(userId);
+      // Only the owner can create or update their profile. The account
+      // deletion schedule is managed by the requestAccountDeletion and
+      // cancelAccountDeletion Cloud Functions.
+      allow create: if isOwner(userId) &&
+        !request.resource.data.keys().hasAny(['deletionRequestedAt', 'deletionScheduledFor']);
+      allow update: if isOwner(userId) &&
+        !request.resource.data.diff(resource.data).affectedKeys()
+          .hasAny(['deletionRequestedAt', 'deletionScheduledFor']);
       
       // Prevent deletion (soft delete only)
       allow delete: if false;

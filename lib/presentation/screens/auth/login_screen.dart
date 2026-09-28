@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_animate/flutter_animate.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../../config/theme_config.dart';
 import '../../../config/routes.dart';
@@ -12,17 +11,6 @@ class LoginScreen extends StatelessWidget {
   const LoginScreen({super.key});
 
   Future<void> _handleAuthSuccess(BuildContext context, AuthAuthenticated state) async {
-    // Check if user has completed onboarding by looking at Firestore
-    final userDoc = await FirebaseFirestore.instance
-        .collection('users')
-        .doc(state.user.uid)
-        .get();
-    
-    // Check if user has a profile with phone number (meaning they completed setup)
-    final phone = userDoc.data()?['phone']?.toString() ?? '';
-    final hasCompletedSetup = userDoc.exists && phone.isNotEmpty;
-    
-    // Also check if permissions setup was done
     final prefs = await SharedPreferences.getInstance();
     final permissionsCompleted = prefs.getBool('permissions_completed') ?? false;
     
@@ -31,16 +19,11 @@ class LoginScreen extends StatelessWidget {
     
     if (!context.mounted) return;
     
-    if (!permissionsCompleted) {
-      // User hasn't done permissions - go to permissions screen
-      Navigator.of(context).pushReplacementNamed(AppRoutes.permissions);
-    } else if (!hasCompletedSetup) {
-      // User did permissions but not profile - go to profile setup
-      Navigator.of(context).pushReplacementNamed(AppRoutes.profileSetup);
-    } else {
-      // User completed everything - go to home
-      Navigator.of(context).pushReplacementNamed(AppRoutes.home);
-    }
+    // The splash screen owns the rest of the routing (profile setup, nest
+    // recovery, starting the tracker), so every entry point agrees on it.
+    Navigator.of(context).pushReplacementNamed(
+      permissionsCompleted ? AppRoutes.splash : AppRoutes.permissions,
+    );
   }
 
   @override

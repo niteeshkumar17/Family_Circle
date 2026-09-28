@@ -5,8 +5,8 @@ import 'package:share_plus/share_plus.dart';
 import '../../../config/theme_config.dart';
 import '../../../services/family_service.dart';
 import '../../../services/location_service.dart';
+import '../../../services/map_focus.dart';
 import '../history/member_history_screen.dart';
-import '../placeholder_screens.dart';
 
 /// Real Family Screen that connects to Firebase
 class RealFamilyScreen extends StatefulWidget {
@@ -513,27 +513,15 @@ class _RealFamilyScreenState extends State<RealFamilyScreen> {
   Widget _buildMemberCard(FamilyMemberData member) {
     return GestureDetector(
       onTap: () {
-        if (member.location != null) {
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (context) => MemberDetailScreen(
-                memberId: member.id,
-                memberName: member.displayName,
-                status: member.statusText,
-                battery: member.battery,
-                lat: member.location?.latitude ?? 0,
-                lng: member.location?.longitude ?? 0,
-                // MemberDetailScreen renders this as km/h, but LocationModel
-                // stores metres per second.
-                speed: member.speedKmh,
-                isMoving: member.isMoving,
-                phone: member.phone,
-                lastSeenText: member.lastSeenText,
-              ),
+        if (member.location == null) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('${member.displayName} hasn\'t shared a location yet'),
             ),
           );
+          return;
         }
+        MapFocus.showMember(member.id);
       },
       child: Container(
         margin: const EdgeInsets.only(bottom: 12),

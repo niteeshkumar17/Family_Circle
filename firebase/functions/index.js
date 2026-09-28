@@ -10,6 +10,7 @@ const { initializeApp } = require('firebase-admin/app');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { getDatabaseWithUrl } = require('firebase-admin/database');
 const { getMessaging } = require('firebase-admin/messaging');
+const { getAuth } = require('firebase-admin/auth');
 
 initializeApp();
 
@@ -552,9 +553,13 @@ exports.generateInviteCode = onCall(async (request) => {
 });
 
 /**
- * Rebuilds the caller's `family_members` index from their real membership
- * documents. Members who joined before the index existed get their read
- * access back without the client being trusted to write the index itself.
+ * Reconciles the caller's profile and `family_members` index with their real
+ * membership documents.
+ *
+ * Members who joined before the index existed get their read access back
+ * without the client being trusted to write the index itself, and nests that
+ * went missing from `users/{uid}.familyIds` (older builds blanked it when the
+ * profile setup screen was shown again after re-login) are put back.
  */
 exports.syncMembershipIndex = onCall(async (request) => {
   if (!request.auth) {
@@ -562,13 +567,19 @@ exports.syncMembershipIndex = onCall(async (request) => {
   }
 
   const uid = request.auth.uid;
-  const userSnap = await db.collection('users').doc(uid).get();
-  const familyIds = (userSnap.get('familyIds') || [])
-    .filter((id) => typeof id === 'string' && id)
+  const userRef = db.collection('users').doc(uid);
+  const [userSnap, listedIn] = await Promise.all([
+    userRef.get(),
+    db.collection('families').where('memberIds', 'array-contains', uid).limit(20).get(),
+  ]);
+
+  const profileIds = (userSnap.get('familyIds') || [])
+    .filter((id) => typeof id === 'string' && id);
+  const candidates = [...new Set([...profileIds, ...listedIn.docs.map((d) => d.id)])]
     .slice(0, 20);
 
   const verified = [];
-  await Promise.all(familyIds.map(async (familyId) => {
+  await Promise.all(candidates.map(async (familyId) => {
     const member = await db
       .collection('families')
       .doc(familyId)
@@ -581,8 +592,212 @@ exports.syncMembershipIndex = onCall(async (request) => {
     }
   }));
 
-  return { familyIds: verified };
+  const missing = verified.filter((id) => !profileIds.includes(id));
+  const current = userSnap.get('currentFamilyId');
+  const currentFamilyId = verified.includes(current) ? current : (verified[0] || null);
+
+  const updates = {};
+  if (missing.length) updates.familyIds = FieldValue.arrayUnion(...missing);
+  if (currentFamilyId !== (current ?? null)) updates.currentFamilyId = currentFamilyId;
+  if (Object.keys(updates).length) {
+    await userRef.set(updates, { merge: true });
+  }
+
+  return { familyIds: verified, currentFamilyId, restored: missing.length };
 });
+
+// ============== ACCOUNT DELETION ==============
+//
+// Deleting an account is reversible for ACCOUNT_DELETION_GRACE_DAYS: the
+// account disappears from every nest's map straight away, but signing in again
+// within the window brings it back untouched. After that purgeDeletedAccounts
+// erases it for good. Clients cannot write the deletion fields themselves
+// (see firestore.rules), so the schedule only changes through these functions.
+
+const ACCOUNT_DELETION_GRACE_DAYS = 30;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+async function familyIdsOf(uid, userSnap) {
+  const listedIn = await db
+    .collection('families')
+    .where('memberIds', 'array-contains', uid)
+    .limit(50)
+    .get();
+  return [...new Set([
+    ...(userSnap?.get('familyIds') || []),
+    ...listedIn.docs.map((d) => d.id),
+  ])].filter((id) => typeof id === 'string' && id);
+}
+
+exports.requestAccountDeletion = onCall(async (request) => {
+  if (!request.auth) {
+    throw new HttpsError('unauthenticated', 'Must be logged in');
+  }
+
+  const uid = request.auth.uid;
+  const userRef = db.collection('users').doc(uid);
+  const userSnap = await userRef.get();
+
+  // Asking twice must not push the deadline further out.
+  const existing = userSnap.get('deletionScheduledFor')?.toDate?.();
+  const scheduledFor = existing && existing.getTime() > Date.now()
+    ? existing
+    : new Date(Date.now() + ACCOUNT_DELETION_GRACE_DAYS * DAY_MS);
+
+  const deletionFields = {
+    deletionRequestedAt: FieldValue.serverTimestamp(),
+    deletionScheduledFor: scheduledFor,
+  };
+  if (userSnap.exists) {
+    await userRef.update({
+      ...deletionFields,
+      fcmToken: FieldValue.delete(),
+      'deviceInfo.fcmToken': FieldValue.delete(),
+    });
+  } else {
+    await userRef.set(deletionFields);
+  }
+
+  const familyIds = await familyIdsOf(uid, userSnap);
+  await Promise.all([
+    ...familyIds.map((familyId) => rtdb.ref(`locations/${familyId}/${uid}`).remove()),
+    rtdb.ref(`presence/${uid}`).remove(),
+    rtdb.ref(`wakeAttempts/${uid}`).remove(),
+  ]);
+
+  // Signs the account out on its other devices so they stop sharing location.
+  await getAuth().revokeRefreshTokens(uid);
+
+  return { scheduledFor: scheduledFor.toISOString() };
+});
+
+exports.cancelAccountDeletion = onCall(async (request) => {
+  if (!request.auth) {
+    throw new HttpsError('unauthenticated', 'Must be logged in');
+  }
+
+  const userRef = db.collection('users').doc(request.auth.uid);
+  const userSnap = await userRef.get();
+  const scheduledFor = userSnap.get('deletionScheduledFor')?.toDate?.();
+  if (!scheduledFor) {
+    return { restored: false };
+  }
+  if (scheduledFor.getTime() <= Date.now()) {
+    throw new HttpsError(
+      'failed-precondition',
+      'The 30-day recovery period has ended and this account has been deleted.'
+    );
+  }
+
+  await userRef.update({
+    deletionRequestedAt: FieldValue.delete(),
+    deletionScheduledFor: FieldValue.delete(),
+  });
+
+  return { restored: true };
+});
+
+/**
+ * Permanently erases accounts whose recovery window has passed.
+ * Runs daily at 2:15 AM UTC.
+ */
+exports.purgeDeletedAccounts = onSchedule('15 2 * * *', async () => {
+  const due = await db
+    .collection('users')
+    .where('deletionScheduledFor', '<=', new Date())
+    .limit(50)
+    .get();
+
+  let purged = 0;
+  for (const userSnap of due.docs) {
+    try {
+      await purgeAccount(userSnap.id, userSnap);
+      purged++;
+    } catch (error) {
+      console.error('Failed to purge account', { uid: userSnap.id, error });
+    }
+  }
+
+  console.log(`Purged ${purged} deleted account(s)`);
+  return null;
+});
+
+async function purgeAccount(uid, userSnap) {
+  const familyIds = await familyIdsOf(uid, userSnap);
+
+  for (const familyId of familyIds) {
+    const familyRef = db.collection('families').doc(familyId);
+    const [family, members] = await Promise.all([
+      familyRef.get(),
+      familyRef.collection('members').get(),
+    ]);
+    if (!family.exists) continue;
+    // Profiles can list nests the user was never admitted to.
+    const isMember = members.docs.some((d) => d.id === uid) ||
+      (family.get('memberIds') || []).includes(uid);
+    if (!isMember) continue;
+
+    const others = members.docs.filter((d) => d.id !== uid);
+    if (others.length === 0) {
+      // onFamilyDeleted clears the nest's Realtime Database data.
+      await db.recursiveDelete(familyRef);
+      continue;
+    }
+
+    // A nest must keep an admin, otherwise nobody can manage it any more.
+    const admins = others.filter((d) => d.get('role') === 'admin');
+    const heir = admins[0] || [...others].sort((a, b) =>
+      (a.get('joinedAt')?.toMillis?.() || 0) - (b.get('joinedAt')?.toMillis?.() || 0))[0];
+
+    const batch = db.batch();
+    const familyUpdates = { memberIds: FieldValue.arrayRemove(uid) };
+    if (family.get('createdBy') === uid) {
+      familyUpdates.createdBy = heir.id;
+      familyUpdates.createdByName = heir.get('displayName') || 'Member';
+    }
+    if (admins.length === 0) {
+      batch.update(heir.ref, { role: 'admin' });
+    }
+    batch.update(familyRef, familyUpdates);
+    // onMemberRemoved clears this member's locations, history and index entry.
+    batch.delete(familyRef.collection('members').doc(uid));
+    await batch.commit();
+
+    await Promise.all([
+      deleteQuery(familyRef.collection('geofence_events').where('userId', '==', uid)),
+      rtdb.ref(`typing_indicators/${familyId}/${uid}`).remove(),
+    ]);
+  }
+
+  await Promise.all([
+    deleteQuery(db.collection('sos_events').where('userId', '==', uid)),
+    db.recursiveDelete(db.collection('notifications').doc(uid)),
+    db.recursiveDelete(db.collection('location_history').doc(uid)),
+    rtdb.ref(`presence/${uid}`).remove(),
+    rtdb.ref(`wakeAttempts/${uid}`).remove(),
+    rtdb.ref(`joinAttempts/${uid}`).remove(),
+  ]);
+
+  await db.recursiveDelete(db.collection('users').doc(uid));
+
+  try {
+    await getAuth().deleteUser(uid);
+  } catch (error) {
+    if (error?.code !== 'auth/user-not-found') throw error;
+  }
+}
+
+async function deleteQuery(query) {
+  const pageSize = 400;
+  while (true) {
+    const snap = await query.limit(pageSize).get();
+    if (snap.empty) return;
+    const batch = db.batch();
+    snap.docs.forEach((doc) => batch.delete(doc.ref));
+    await batch.commit();
+    if (snap.size < pageSize) return;
+  }
+}
 
 // ============== MEMBERSHIP MIRRORING & CLEANUP ==============
 
@@ -616,11 +831,54 @@ exports.onMemberRemoved = onDocumentDeleted(
       rtdb.ref(`geofence_states/${familyId}/${userId}`).remove(),
       rtdb.ref(`low_battery_alerts/${familyId}/${userId}`).remove(),
       detachUserFromFamily(userId, familyId),
+      settleFamilyAfterDeparture(familyId, userId),
     ]);
 
     return null;
   }
 );
+
+/**
+ * Keeps a nest manageable once someone leaves it. The rules treat `createdBy`
+ * as an admin, so a creator who left would otherwise keep admin powers over a
+ * nest they are no longer in, and a nest whose only admin left could never be
+ * managed again. An empty nest is deleted.
+ */
+async function settleFamilyAfterDeparture(familyId, userId) {
+  const familyRef = db.collection('families').doc(familyId);
+  const [family, members] = await Promise.all([
+    familyRef.get(),
+    familyRef.collection('members').get(),
+  ]);
+  // Deleted along with the nest itself; onFamilyDeleted does the rest.
+  if (!family.exists) return;
+
+  if (members.empty) {
+    await db.recursiveDelete(familyRef);
+    return;
+  }
+
+  const admins = members.docs.filter((d) => d.get('role') === 'admin');
+  const createdBy = family.get('createdBy');
+  const creatorStillMember = members.docs.some((d) => d.id === createdBy);
+  if (admins.length > 0 && creatorStillMember) return;
+
+  const heir = admins[0] || [...members.docs].sort((a, b) =>
+    (a.get('joinedAt')?.toMillis?.() || 0) - (b.get('joinedAt')?.toMillis?.() || 0))[0];
+
+  const batch = db.batch();
+  if (admins.length === 0) {
+    batch.update(heir.ref, { role: 'admin' });
+  }
+  if (!creatorStillMember) {
+    batch.update(familyRef, {
+      createdBy: heir.id,
+      createdByName: heir.get('displayName') || 'Member',
+    });
+  }
+  await batch.commit();
+  console.log(`Nest ${familyId} handed to ${heir.id} after ${userId} left`);
+}
 
 /**
  * Deletes the data that a client cannot reach once the family document is gone.
@@ -643,6 +901,7 @@ exports.onFamilyDeleted = onDocumentDeleted('families/{familyId}', async (event)
   ]);
 
   await Promise.all([
+    deleteSubcollection(db.collection('families').doc(familyId).collection('members')),
     deleteSubcollection(db.collection('families').doc(familyId).collection('geofences')),
     deleteSubcollection(db.collection('families').doc(familyId).collection('geofence_events')),
   ]);

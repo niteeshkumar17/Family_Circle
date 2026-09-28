@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -83,10 +84,15 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
           break;
 
         case 2:
-          // Request to ignore battery optimizations
-          await Permission.ignoreBatteryOptimizations.request();
-          
-          if (mounted) {
+          var batteryStatus = await Permission.ignoreBatteryOptimizations.status;
+          if (!batteryStatus.isGranted) {
+            await Permission.ignoreBatteryOptimizations.request();
+            batteryStatus = await _batteryStatusOnceBack();
+          }
+
+          // Only fall back to manual instructions when the system prompt
+          // didn't exempt the app (e.g. user declined or OEM blocked it).
+          if (!batteryStatus.isGranted && mounted) {
             // Show custom instruction dialog for manufacturer power settings
             await showDialog(
               context: context,
@@ -158,6 +164,23 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
     }
   }
 
+  /// MIUI answers the battery request as soon as it opens its own settings
+  /// page, before the user has picked anything, so the real answer is only
+  /// known once the app is back in front.
+  Future<PermissionStatus> _batteryStatusOnceBack() async {
+    await Future.delayed(const Duration(seconds: 1));
+    final resumed = Completer<void>();
+    final listener = AppLifecycleListener(onResume: () {
+      if (!resumed.isCompleted) resumed.complete();
+    });
+    if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
+      resumed.complete();
+    }
+    await resumed.future;
+    listener.dispose();
+    return Permission.ignoreBatteryOptimizations.status;
+  }
+
   void _skipCurrent() {
     if (_currentStep < _permissions.length - 1) {
       setState(() => _currentStep++);
@@ -172,7 +195,9 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
     await prefs.setBool('permissions_completed', true);
     
     if (!mounted) return;
-    Navigator.of(context).pushReplacementNamed(AppRoutes.profileSetup);
+    // Returning users already have a profile; the splash screen routes to
+    // profile setup only when it is actually missing.
+    Navigator.of(context).pushReplacementNamed(AppRoutes.splash);
   }
 
   @override

@@ -5,7 +5,9 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../../config/routes.dart';
 import '../../../config/theme_config.dart';
+import '../../../services/account_service.dart';
 import '../../../services/background_service.dart';
+import '../../../services/family_service.dart';
 import '../../../services/notification_service.dart';
 
 class SplashScreen extends StatefulWidget {
@@ -32,7 +34,9 @@ class _SplashScreenState extends State<SplashScreen> {
     final prefs = await SharedPreferences.getInstance();
     final onboardingCompleted = prefs.getBool('onboarding_completed') ?? false;
 
-    if (!onboardingCompleted) {
+    // Someone already signed in has been through onboarding, even if an older
+    // build's logout wiped the flag; sending them there would loop back here.
+    if (!onboardingCompleted && FirebaseAuth.instance.currentUser == null) {
       // First time user - show onboarding
       if (!mounted) return;
       Navigator.of(context).pushReplacementNamed(AppRoutes.onboarding);
@@ -42,6 +46,22 @@ class _SplashScreenState extends State<SplashScreen> {
     // Check if user is already authenticated
     final user = FirebaseAuth.instance.currentUser;
     if (user != null) {
+      DocumentSnapshot<Map<String, dynamic>>? userDoc;
+      try {
+        userDoc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+      } catch (e) {
+        debugPrint('Error loading profile: $e');
+      }
+
+      // Checked before notifications and tracking start, so an account in its
+      // deletion grace period stays invisible unless its owner recovers it.
+      final deleteOn = AccountService.scheduledDeletionOf(userDoc?.data());
+      if (deleteOn != null) {
+        if (!mounted) return;
+        Navigator.of(context).pushReplacementNamed(AppRoutes.accountRecovery, arguments: deleteOn);
+        return;
+      }
+
       // User is logged in, check if they completed all setup steps
       final permissionsCompleted = prefs.getBool('permissions_completed') ?? false;
       
@@ -59,20 +79,34 @@ class _SplashScreenState extends State<SplashScreen> {
       }
 
       try {
-        final userDoc = await FirebaseFirestore.instance
+        userDoc ??= await FirebaseFirestore.instance
             .collection('users')
             .doc(user.uid)
             .get();
-        
+
         final phone = userDoc.data()?['phone']?.toString() ?? '';
         final hasCompletedSetup = userDoc.exists && phone.isNotEmpty;
         
         // Hand the tracker the full nest list so a user in several nests stays
         // visible in all of them, not just the one that happens to be open.
-        final familyIds = List<String>.from(userDoc.data()?['familyIds'] ?? []);
+        var familyIds = List<String>.from(userDoc.data()?['familyIds'] ?? []);
+        String? currentFamilyId = userDoc.data()?['currentFamilyId'];
+
+        // An empty list does not always mean "no nest": older builds wiped it
+        // when profile setup ran again after re-login. Ask the server before
+        // sending an existing member to "create or join".
+        if (familyIds.isEmpty && hasCompletedSetup) {
+          try {
+            final restored = await FamilyService().restoreMemberships();
+            familyIds = restored.familyIds;
+            currentFamilyId = restored.currentFamilyId;
+          } catch (e) {
+            debugPrint('Could not restore memberships: $e');
+          }
+        }
+
         if (permissionsCompleted && familyIds.isNotEmpty) {
-          final activeFamilyId =
-              userDoc.data()?['currentFamilyId'] ?? familyIds.first;
+          final activeFamilyId = currentFamilyId ?? familyIds.first;
           try {
             await BackgroundLocationService().configureForUser(
               userId: user.uid,

@@ -182,10 +182,20 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
       await _auth.signOut();
     } catch (_) {}
 
-    // Reset onboarding and permission flags for the next account.
+    // Drop everything tied to the account. Onboarding and the Android
+    // permission grants belong to the device, so the next sign-in should not
+    // walk through them again.
     try {
       final prefs = await SharedPreferences.getInstance();
+      const deviceKeys = {'onboarding_completed', 'permissions_completed'};
+      final kept = {
+        for (final key in deviceKeys)
+          if (prefs.getBool(key) != null) key: prefs.getBool(key)!,
+      };
       await prefs.clear();
+      for (final entry in kept.entries) {
+        await prefs.setBool(entry.key, entry.value);
+      }
     } catch (_) {}
 
     emit(AuthUnauthenticated());

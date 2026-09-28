@@ -214,6 +214,23 @@ class FamilyService {
     }
   }
 
+  /// Nests the signed-in user really belongs to, according to the server.
+  ///
+  /// Also repairs `users/{uid}.familyIds` and `currentFamilyId` if they have
+  /// drifted from the membership documents, so a profile that lost its nest
+  /// list gets it back instead of being sent to "create or join".
+  Future<({List<String> familyIds, String? currentFamilyId})>
+      restoreMemberships() async {
+    final result =
+        await _functions.httpsCallable('syncMembershipIndex').call();
+    _membershipIndexSynced = true;
+    final data = Map<String, dynamic>.from(result.data as Map);
+    return (
+      familyIds: List<String>.from(data['familyIds'] ?? const []),
+      currentFamilyId: data['currentFamilyId'] as String?,
+    );
+  }
+
   /// Ask the server to rebuild `family_members/{familyId}/{uid}`.
   ///
   /// The database rules scope reads of `locations`, `locationHistory` and
@@ -756,6 +773,11 @@ class FamilyService {
     });
   }
 
+  Future<bool> isCurrentUserAdmin(String familyId) async {
+    final uid = _auth.currentUser?.uid;
+    return uid != null && await _isFamilyAdmin(familyId, uid);
+  }
+
   /// True when [userId] created the family or holds the admin role.
   Future<bool> _isFamilyAdmin(String familyId, String userId) async {
     final familyDoc = await _firestore.collection('families').doc(familyId).get();
@@ -778,28 +800,16 @@ class FamilyService {
 
     final familyId = _currentFamilyId!;
 
+    if (!await _isFamilyAdmin(familyId, user.uid)) {
+      throw Exception('Only a nest admin can delete the nest');
+    }
+
     try {
-      // Check if user is admin
-      final familyDoc = await _firestore.collection('families').doc(familyId).get();
-      if (familyDoc.exists) {
-        if (familyDoc.data()?['createdBy'] != user.uid) {
-          throw Exception('Only the family admin can delete the family');
-        }
-
-        // Detaching every other member's profile and clearing the Realtime
-        // Database subtree is the `onFamilyDeleted` Cloud Function's job; the
-        // rules stop a client from touching another user's documents.
-        final membersSnapshot = await _firestore
-            .collection('families')
-            .doc(familyId)
-            .collection('members')
-            .get();
-        for (final doc in membersSnapshot.docs) {
-          await doc.reference.delete();
-        }
-
-        await _firestore.collection('families').doc(familyId).delete();
-      }
+      // Only the nest document is deleted here. Removing the member records,
+      // detaching every member's profile and clearing the Realtime Database
+      // subtree is the `onFamilyDeleted` Cloud Function's job. Deleting members
+      // first would hand the nest to someone else mid-way (see onMemberRemoved).
+      await _firestore.collection('families').doc(familyId).delete();
     } on FirebaseException catch (e) {
       if (e.code != 'permission-denied' && e.code != 'not-found') {
         rethrow;
@@ -1003,9 +1013,24 @@ class _FamilyMembersFeed {
   final Map<String, _MemberProfile> _profiles = {};
 
   bool _started = false;
+  bool _hasEmitted = false;
   List<FamilyMemberData> _latest = const [];
 
-  Stream<List<FamilyMemberData>> get stream => _controller.stream;
+  /// The feed is shared, so screens opened after the first emission (e.g. a
+  /// dialog over the map) are handed the current roster straight away rather
+  /// than waiting for the next change.
+  Stream<List<FamilyMemberData>> get stream => Stream.multi((listener) {
+        if (_hasEmitted) listener.add(_latest);
+        final sub = _controller.stream.listen(
+          listener.add,
+          onError: listener.addError,
+          onDone: listener.close,
+        );
+        listener
+          ..onPause = sub.pause
+          ..onResume = sub.resume
+          ..onCancel = sub.cancel;
+      });
 
   void _start() {
     if (_started) return;
@@ -1139,6 +1164,7 @@ class _FamilyMembersFeed {
     });
 
     _latest = members;
+    _hasEmitted = true;
     _controller.add(_latest);
   }
 

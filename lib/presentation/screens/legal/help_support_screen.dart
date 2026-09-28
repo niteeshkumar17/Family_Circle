@@ -238,9 +238,9 @@ class HelpSupportScreen extends StatelessWidget {
                     questions: [
                       _FAQItem(
                         question: 'How do I delete my account?',
-                        answer: 'To delete your account and all associated data, go to Settings > Account Actions > Contact Support. '
-                            'Send an email to $_supportEmail requesting account deletion. '
-                            'Your data will be permanently erased within 30 days of the request.',
+                        answer: 'Go to Settings > Account Actions > Delete Account. Your account is deactivated right away and '
+                            'you can recover it by signing in again with the same Google account within 30 days. '
+                            'After that, your profile, location history and nest memberships are permanently erased.',
                       ),
                       _FAQItem(
                         question: 'Who can see my location?',

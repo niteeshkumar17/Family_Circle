@@ -4,6 +4,7 @@ import '../presentation/screens/onboarding/onboarding_screen.dart';
 import '../presentation/screens/auth/login_screen.dart';
 import '../presentation/screens/auth/permissions_screen.dart';
 import '../presentation/screens/auth/profile_setup_screen.dart';
+import '../presentation/screens/auth/account_recovery_screen.dart';
 import '../presentation/screens/family/create_join_family_screen.dart';
 import '../presentation/screens/family/create_family_screen.dart';
 import '../presentation/screens/family/join_family_screen.dart';
@@ -27,7 +28,6 @@ class AppRoutes {
   static const String createFamily = '/create-family';
   static const String joinFamily = '/join-family';
   static const String home = '/home';
-  static const String memberDetail = '/member-detail';
   static const String createGeofence = '/create-geofence';
   static const String sos = '/sos';
   static const String manageNest = '/manage-nest';
@@ -36,6 +36,7 @@ class AppRoutes {
   static const String terms = '/terms';
   static const String helpSupport = '/help-support';
   static const String backgroundSetup = '/background-setup';
+  static const String accountRecovery = '/account-recovery';
 
   static Route<dynamic> generateRoute(RouteSettings settings) {
     switch (settings.name) {
@@ -57,16 +58,6 @@ class AppRoutes {
         return _buildRoute(const JoinFamilyScreen());
       case home:
         return _buildRoute(const HomeScreen());
-      case memberDetail:
-        final args = settings.arguments as Map<String, dynamic>;
-        return _buildRoute(MemberDetailScreen(
-          memberId: args['memberId'],
-          memberName: args['memberName'],
-          status: args['status'],
-          battery: args['battery'],
-          lat: args['lat'],
-          lng: args['lng'],
-        ));
       case createGeofence:
         final args = settings.arguments as Map<String, dynamic>?;
         return _buildRoute(CreateGeofenceScreen(
@@ -88,6 +79,8 @@ class AppRoutes {
         return _buildRoute(const HelpSupportScreen());
       case backgroundSetup:
         return _buildRoute(const BackgroundSetupScreen());
+      case accountRecovery:
+        return _buildRoute(AccountRecoveryScreen(deleteOn: settings.arguments as DateTime));
       default:
         return _buildRoute(const SplashScreen());
     }

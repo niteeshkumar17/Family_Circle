@@ -17,6 +17,7 @@ class ManageNestScreen extends StatefulWidget {
 class _ManageNestScreenState extends State<ManageNestScreen> {
   final FamilyService _familyService = FamilyService();
   FamilyInfo? _familyInfo;
+  bool _isAdmin = false;
   bool _isLoading = true;
   bool _locationSharing = true;
   bool _isRegeneratingCode = false;
@@ -49,10 +50,15 @@ class _ManageNestScreenState extends State<ManageNestScreen> {
 
   Future<void> _loadFamilyInfo() async {
     try {
+      // Opened straight from Settings the service may not have picked the
+      // current nest up yet.
+      await _familyService.getCurrentUserFamilyId();
       final info = await _familyService.getCurrentFamilyInfo();
+      final isAdmin = info != null && await _familyService.isCurrentUserAdmin(info.id);
       if (mounted) {
         setState(() {
           _familyInfo = info;
+          _isAdmin = isAdmin;
           _isLoading = false;
         });
         _loadLocationSharingPref();
@@ -115,7 +121,7 @@ class _ManageNestScreenState extends State<ManageNestScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final isAdmin = _familyInfo?.createdBy == _familyService.currentUserId;
+    final isAdmin = _isAdmin;
 
     return Scaffold(
       backgroundColor: const Color(0xFF0D0D0D),
@@ -469,9 +475,12 @@ class _ManageNestScreenState extends State<ManageNestScreen> {
         backgroundColor: const Color(0xFF1E1E1E),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Text('Leave Nest?', style: TextStyle(color: Colors.white)),
-        content: const Text(
-          'Are you sure you want to leave this family circle? You will need an invite code to rejoin.',
-          style: TextStyle(color: Colors.white70),
+        content: Text(
+          'Are you sure you want to leave ${_familyInfo?.familyName ?? 'this nest'}? '
+          'You will need an invite code to rejoin.'
+          '${_isAdmin ? '\n\nIf you are the only admin, another member becomes admin. '
+              'If you are the last member, the nest is deleted.' : ''}',
+          style: const TextStyle(color: Colors.white70),
         ),
         actions: [
           TextButton(
@@ -488,12 +497,13 @@ class _ManageNestScreenState extends State<ManageNestScreen> {
                 if (mounted) {
                   messenger.showSnackBar(
                     const SnackBar(
-                      content: Text('You have left the family'),
+                      content: Text('You have left the nest'),
                       backgroundColor: AppTheme.successColor,
                     ),
                   );
+                  // Splash opens the next nest, or "create or join" if none is left.
                   navigator.pushNamedAndRemoveUntil(
-                    AppRoutes.createJoinFamily,
+                    AppRoutes.splash,
                     (route) => false,
                   );
                 }
@@ -542,12 +552,12 @@ class _ManageNestScreenState extends State<ManageNestScreen> {
                 if (mounted) {
                   messenger.showSnackBar(
                     const SnackBar(
-                      content: Text('Family deleted'),
+                      content: Text('Nest deleted'),
                       backgroundColor: AppTheme.successColor,
                     ),
                   );
                   navigator.pushNamedAndRemoveUntil(
-                    AppRoutes.createJoinFamily,
+                    AppRoutes.splash,
                     (route) => false,
                   );
                 }

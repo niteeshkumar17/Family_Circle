@@ -58,8 +58,13 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     try {
       final user = FirebaseAuth.instance.currentUser;
       if (user != null) {
-        // Save profile to Firestore
-        await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+        // Merged into any existing profile, so nest membership (`familyIds`,
+        // `currentFamilyId`) must never be written here: this screen is
+        // shown again to returning users after they sign back in.
+        final userRef =
+            FirebaseFirestore.instance.collection('users').doc(user.uid);
+        final existing = await userRef.get();
+        await userRef.set({
           'id': user.uid,
           'name': _nameController.text.trim(),
           'displayName': _nameController.text.trim(),
@@ -67,8 +72,7 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
           'phone': '$_selectedCountryCode${_phoneController.text.trim()}',
           'email': user.email,
           'photoUrl': user.photoURL,
-          'familyIds': [],
-          'createdAt': FieldValue.serverTimestamp(),
+          if (!existing.exists) 'createdAt': FieldValue.serverTimestamp(),
           'updatedAt': FieldValue.serverTimestamp(),
         }, SetOptions(merge: true));
 
@@ -84,7 +88,9 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
 
       if (!mounted) return;
 
-      Navigator.of(context).pushReplacementNamed(AppRoutes.createJoinFamily);
+      // The splash screen decides between home and "create or join", and
+      // recovers nests for returning users.
+      Navigator.of(context).pushReplacementNamed(AppRoutes.splash);
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error: $e')),

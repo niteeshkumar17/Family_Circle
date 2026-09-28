@@ -207,7 +207,7 @@ class PrivacyPolicyScreen extends StatelessWidget {
                       _buildBulletList([
                         'Access & Portability: You may request a copy of all personal data we hold about you.',
                         'Correction: You may update your profile information at any time through the app.',
-                        'Deletion: You may request deletion of your account and all associated data by contacting us.',
+                        'Deletion: You may delete your account from Settings > Account Actions. It can be recovered by signing in within 30 days, after which all associated data is permanently erased.',
                         'Location Control: You can enable or disable location sharing per Nest at any time via the "Manage Nest" screen.',
                         'Notification Control: You can manage push notification preferences through your device settings.',
                         'Withdraw Consent: You may withdraw consent at any time by disabling location services or deleting your account.',
