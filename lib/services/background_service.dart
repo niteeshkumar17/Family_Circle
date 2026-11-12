@@ -613,6 +613,28 @@ Future<void> onStart(ServiceInstance service) async {
         lastHistoryLng = lng;
         lastHistoryTime = now;
       }
+      if (anySucceeded) {
+        try {
+          final pending = await LocationCacheService().getPendingLocations();
+          if (pending.isNotEmpty) {
+            final syncedIds = <int>[];
+            for (final row in pending) {
+              final famId = row['family_id'] as String?;
+              final rowUid = row['user_id'] as String?;
+              final ts = row['timestamp'] as int?;
+              final rowId = row['id'] as int?;
+              if (famId == null || rowUid == null || ts == null || rowId == null) continue;
+              final dt = DateTime.fromMillisecondsSinceEpoch(ts);
+              final dKey = '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
+              await database
+                  .ref('locationHistory/$famId/$rowUid/$dKey/$ts')
+                  .set(LocationCacheService().rowToLocationData(row));
+              syncedIds.add(rowId);
+            }
+            await LocationCacheService().markAsSynced(syncedIds);
+          }
+        } catch (_) {}
+      }
       return anySucceeded;
     }
 

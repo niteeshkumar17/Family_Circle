@@ -28,6 +28,7 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
   List<FamilyMemberData> _familyMembers = [];
   StreamSubscription<List<FamilyMemberData>>? _familyMembersSubscription;
   Timer? _durationTimer;
+  Timer? _countdownTimer;
   String? _activeSosEventId;
 
   @override
@@ -59,11 +60,13 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
   void dispose() {
     _familyMembersSubscription?.cancel();
     _durationTimer?.cancel();
+    _countdownTimer?.cancel();
     _pulseController.dispose();
     super.dispose();
   }
 
   void _startCountdown() {
+    _countdownTimer?.cancel();
     setState(() {
       _isConfirming = true;
       _countdown = 3;
@@ -72,25 +75,23 @@ class _SosScreenState extends State<SosScreen> with TickerProviderStateMixin {
     // Haptic feedback
     HapticFeedback.heavyImpact();
 
-    Future.delayed(const Duration(seconds: 1), () {
-      if (!mounted || !_isConfirming) return;
-      setState(() => _countdown = 2);
-      HapticFeedback.mediumImpact();
-      
-      Future.delayed(const Duration(seconds: 1), () {
-        if (!mounted || !_isConfirming) return;
-        setState(() => _countdown = 1);
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted || !_isConfirming) {
+        timer.cancel();
+        return;
+      }
+      if (_countdown > 1) {
+        setState(() => _countdown--);
         HapticFeedback.mediumImpact();
-        
-        Future.delayed(const Duration(seconds: 1), () {
-          if (!mounted || !_isConfirming) return;
-          unawaited(_triggerSOS());
-        });
-      });
+      } else {
+        timer.cancel();
+        unawaited(_triggerSOS());
+      }
     });
   }
 
   void _cancelCountdown() {
+    _countdownTimer?.cancel();
     setState(() {
       _isConfirming = false;
       _countdown = 3;

@@ -173,8 +173,7 @@ class LocationCacheService {
         DELETE FROM cached_locations 
         WHERE id IN (
           SELECT id FROM cached_locations 
-          WHERE synced = 1 
-          ORDER BY timestamp ASC 
+          ORDER BY synced DESC, timestamp ASC 
           LIMIT ?
         )
       ''', [excess]);

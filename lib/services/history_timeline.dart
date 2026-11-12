@@ -327,7 +327,10 @@ class HistoryTimelineBuilder {
       if (current != null &&
           _distance(current.centroidLat, current.centroidLng, point.latitude,
                   point.longitude) <=
-              radius) {
+              radius &&
+          _distance(current.first.latitude, current.first.longitude,
+                  point.latitude, point.longitude) <=
+              radius * 1.25) {
         current.add(point);
       } else {
         clusters.add(_Cluster(point));

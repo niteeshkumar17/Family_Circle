@@ -1144,8 +1144,22 @@ function isInQuietHours(settings) {
     return false;
   }
 
-  const now = new Date();
-  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  const timeZone = settings.timeZone || "Asia/Kolkata";
+  let currentMinutes;
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hour12: false,
+      hour: "2-digit",
+      minute: "2-digit",
+    }).formatToParts(new Date());
+    const hour = Number(parts.find((p) => p.type === "hour")?.value ?? 0) % 24;
+    const minute = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
+    currentMinutes = hour * 60 + minute;
+  } catch (_) {
+    const now = new Date();
+    currentMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
+  }
   const startMinutes = settings.quietStart.hour * 60 + settings.quietStart.minute;
   const endMinutes = settings.quietEnd.hour * 60 + settings.quietEnd.minute;
 

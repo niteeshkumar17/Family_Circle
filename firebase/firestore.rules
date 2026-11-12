@@ -39,7 +39,12 @@ service cloud.firestore {
         (fids.size() > 1 && isFamilyMember(fids[1])) ||
         (fids.size() > 2 && isFamilyMember(fids[2])) ||
         (fids.size() > 3 && isFamilyMember(fids[3])) ||
-        (fids.size() > 4 && isFamilyMember(fids[4]));
+        (fids.size() > 4 && isFamilyMember(fids[4])) ||
+        (fids.size() > 5 && isFamilyMember(fids[5])) ||
+        (fids.size() > 6 && isFamilyMember(fids[6])) ||
+        (fids.size() > 7 && isFamilyMember(fids[7])) ||
+        (fids.size() > 8 && isFamilyMember(fids[8])) ||
+        (fids.size() > 9 && isFamilyMember(fids[9]));
     }
 
     // A member leaving may take only themselves off `memberIds`.
@@ -171,7 +176,9 @@ service cloud.firestore {
         request.resource.data.userId == request.auth.uid;
       
       // Family members can update (respond to) SOS events
-      allow update: if isFamilyMember(resource.data.familyId);
+      allow update: if isFamilyMember(resource.data.familyId) &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status', 'resolvedAt', 'resolvedBy', 'responders', 'updatedAt']);
       
       // SOS events cannot be deleted
       allow delete: if false;

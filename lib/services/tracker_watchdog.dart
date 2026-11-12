@@ -34,9 +34,13 @@ class TrackerWatchdog {
   /// WorkManager will not schedule anything tighter than this.
   static const _period = Duration(minutes: 15);
 
-  /// A tracker that has not published within this window is treated as stuck
+  /// A moving tracker that has not published within this window is treated as stuck
   /// even if its service object still exists.
-  static const _staleAfter = Duration(minutes: 12);
+  static const _movingStaleAfter = Duration(minutes: 12);
+
+  /// Deep rest heartbeats every 10 minutes (600s); allow 2 missed beats + Doze
+  /// deferral margin before waking high-accuracy GNSS.
+  static const _restingStaleAfter = Duration(minutes: 25);
 
   /// How long to wait for a nudged service to actually publish. The forced fix
   /// inside the service times out at 20s, so this has to outlast that.
@@ -151,7 +155,8 @@ class TrackerWatchdog {
     try {
       final running = await service.isRunning();
       final lastPushRaw = prefs?.getString(BgPrefsKeys.lastPush);
-      debugPrint('$_tag service running=$running lastPush=$lastPushRaw');
+      final isResting = prefs?.getString(BgPrefsKeys.mode) == 'resting';
+      debugPrint('$_tag service running=$running resting=$isResting lastPush=$lastPushRaw');
 
       if (!running) {
         repaired = await service.start();
@@ -162,7 +167,7 @@ class TrackerWatchdog {
         } else {
           failure = 'The tracker service refused to start.';
         }
-      } else if (_isStale(lastPushRaw)) {
+      } else if (_isStale(lastPushRaw, isResting: isResting)) {
         // Alive but silent, usually a GPS subscription the OS quietly dropped.
         debugPrint('$_tag service alive but stale, forcing an update');
         service.forceUpdate();
@@ -239,11 +244,12 @@ class TrackerWatchdog {
     } catch (_) {}
   }
 
-  static bool _isStale(String? lastPushIso) {
+  static bool _isStale(String? lastPushIso, {bool isResting = false}) {
     if (lastPushIso == null) return true;
     final lastPush = DateTime.tryParse(lastPushIso);
     if (lastPush == null) return true;
-    return DateTime.now().difference(lastPush) > _staleAfter;
+    final threshold = isResting ? _restingStaleAfter : _movingStaleAfter;
+    return DateTime.now().difference(lastPush) > threshold;
   }
 }
 

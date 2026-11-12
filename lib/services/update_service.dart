@@ -18,13 +18,13 @@ class UpdateService {
 
   /// Checks for updates and prompts the user if one is available
   Future<void> checkForUpdates(BuildContext context, {bool showNoUpdateMsg = false}) async {
-    if (_isChecking) return;
+    if (!Platform.isAndroid || _isChecking) return;
     _isChecking = true;
 
     try {
       // 1. Get current app version
       final packageInfo = await PackageInfo.fromPlatform();
-      final currentVersion = packageInfo.version;
+      final currentVersion = packageInfo.version.split('+').first;
 
       // 2. Fetch latest version info from Firestore
       final doc = await _firestore.collection('app_config').doc('version').get();
