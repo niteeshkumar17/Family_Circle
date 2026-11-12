@@ -162,7 +162,9 @@ class LocationCacheService {
       whereArgs: [cutoff],
     );
 
-    // If still over limit, delete oldest synced entries first
+    // If still over the cap, drop the oldest already-synced rows first, then
+    // the oldest unsynced ones. Skipping unsynced rows here let an offline
+    // phone grow the cache without limit.
     final count = Sqflite.firstIntValue(
       await db.rawQuery('SELECT COUNT(*) FROM cached_locations'),
     ) ?? 0;

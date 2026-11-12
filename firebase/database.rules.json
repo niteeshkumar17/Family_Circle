@@ -52,7 +52,12 @@
       "$familyId": {
         ".read": "auth != null && root.child('family_members').child($familyId).child(auth.uid).exists()",
         "$userId": {
-          ".write": "auth != null && auth.uid == $userId && root.child('family_members').child($familyId).child(auth.uid).exists()"
+          ".write": "auth != null && auth.uid == $userId && root.child('family_members').child($familyId).child(auth.uid).exists()",
+          "$dateKey": {
+            "$pointId": {
+              ".validate": "newData.hasChildren(['latitude', 'longitude', 'timestamp']) && newData.child('latitude').isNumber() && newData.child('latitude').val() >= -90 && newData.child('latitude').val() <= 90 && newData.child('longitude').isNumber() && newData.child('longitude').val() >= -180 && newData.child('longitude').val() <= 180 && newData.child('timestamp').isNumber()"
+            }
+          }
         }
       }
     },
